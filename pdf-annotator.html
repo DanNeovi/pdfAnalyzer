@@ -11,19 +11,38 @@
             margin: 20px auto;
             box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
             border-radius: 12px;
-            overflow: hidden;
             border: 1px solid #e5e7eb;
             transition: transform 0.1s ease-out;
+            display: inline-block;
         }
         .pdf-viewer-canvas {
             display: block;
             background-color: white;
+            position: relative;
+            z-index: 1;
         }
-        .fabric-canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            z-index: 10;
+        .canvas-container {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: 0 !important;
+            bottom: 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+            z-index: 10 !important;
+        }
+        .lower-canvas {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            z-index: 1 !important;
+        }
+        .upper-canvas {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            z-index: 2 !important;
+            cursor: crosshair !important;
         }
         .active-tool {
             background-color: #4f46e5 !important;
@@ -52,8 +71,8 @@
 </head>
 <body class="bg-gray-50 min-h-screen">
 
-<header class="bg-white shadow-xl sticky top-0 z-10 border-b border-gray-200">
-    <div class="max-w-7xl mx-auto py-3 px-4 flex flex-wrap items-center justify-between">
+<header class="bg-white shadow-xl sticky top-0 z-20 border-b border-gray-200">
+    <div class="max-w-full mx-auto py-3 px-4 flex flex-wrap items-center justify-between">
         <h1 class="text-2xl font-extrabold text-gray-900"><span class="text-indigo-600">Draft</span>Annotator</h1>
         <div class="flex flex-wrap items-center space-x-3 mt-2 sm:mt-0">
             <button id="btnLoadPdf" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-5 rounded-xl">Load PDF</button>
@@ -66,7 +85,7 @@
             <div class="border-l border-gray-300 h-8"></div>
             <div class="tool-control-group">
                 <label for="fontSizeInput">Size:</label>
-                <input type="number" id="fontSizeInput" value="18" min="8" max="72" class="w-14 text-sm rounded-lg">
+                <input type="number" id="fontSizeInput" value="24" min="8" max="72" class="w-14 text-sm rounded-lg">
             </div>
             <div class="tool-control-group">
                 <label for="fontFamilySelect">Font:</label>
@@ -79,6 +98,50 @@
         </div>
     </div>
 </header>
+
+<div class="flex">
+<!-- Sidebar -->
+<aside class="w-72 bg-white shadow-xl border-r border-gray-200 overflow-y-auto h-screen sticky top-0">
+    <div class="p-5">
+        <h2 class="text-xl font-bold text-gray-900 mb-4">📋 Quick Reference</h2>
+        
+        <div class="space-y-4">
+            <!-- Assembly ID -->
+            <div class="bg-gray-50 p-4 rounded-lg">
+                <h3 class="font-bold text-gray-900 mb-2">Assembly ID</h3>
+                <p class="font-mono text-indigo-700 font-bold mb-2">WL-2008</p>
+                <ul class="space-y-1 text-gray-700 text-sm">
+                    <li>2 = Floor elevation</li>
+                    <li>0 = Exterior (1=Interior)</li>
+                    <li>08 = Wall number</li>
+                </ul>
+            </div>
+
+            <!-- Wall Specs -->
+            <div class="bg-gray-50 p-4 rounded-lg">
+                <h3 class="font-bold text-gray-900 mb-2">Wall Specs</h3>
+                <ul class="space-y-1 text-gray-700 text-sm">
+                    <li>Max length: 25'</li>
+                    <li>Ceiling: 9' or 10'</li>
+                    <li>Wall height: 10'-8"</li>
+                </ul>
+            </div>
+
+            <!-- Electrical -->
+            <div class="bg-gray-50 p-4 rounded-lg">
+                <h3 class="font-bold text-gray-900 mb-2">⚡ Outlets (AFF)</h3>
+                <ul class="space-y-1 text-gray-700 text-sm">
+                    <li>Wall: 18½" (1'-6½")</li>
+                    <li>Countertop: 44" (3'-8")</li>
+                    <li>TV: 60" (5'-0")</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</aside>
+
+<!-- Main Content -->
+<div class="flex-1">
 
 <input type="file" id="fileInput" accept="application/pdf">
 
@@ -104,8 +167,9 @@
 
 <script>
 const {jsPDF}=window.jspdf;
-let pdfDoc=null,numPages=0,scale=1.5,activeTool='select',currentFontSize=18,currentFontFamily='sans-serif';
+let pdfDoc=null,numPages=0,scale=1.5,activeTool='select',currentFontSize=24,currentFontFamily='sans-serif';
 let isPanning=false,panStartX=0,panStartY=0,panOffsetX=0,panOffsetY=0,currentZoom=1;
+let hasUnsavedChanges=false;
 const pdfViewer=document.getElementById('pdfViewer'),fileInput=document.getElementById('fileInput');
 const btnLoadPdf=document.getElementById('btnLoadPdf'),btnSavePdf=document.getElementById('btnSavePdf');
 const fontSizeInput=document.getElementById('fontSizeInput'),fontFamilySelect=document.getElementById('fontFamilySelect');
@@ -117,6 +181,7 @@ function saveCanvasState(c){
     c.history.push(JSON.stringify(c.toJSON(['annotationType','selectable','evented'])));
     c.historyPointer=c.history.length-1;
     if(c.history.length>50){c.history.shift();c.historyPointer--;}
+    if(c.historyPointer>0)hasUnsavedChanges=true;
 }
 
 function undo(){
@@ -175,15 +240,15 @@ function handleArrowEnd(){
     const grp=new fabric.Group([arrowLine,head],{selectable:true,evented:true,hasControls:true,hasBorders:true});
     activeCanvas.remove(arrowLine);activeCanvas.remove(head);activeCanvas.add(grp);
     activeCanvas.renderAll();saveCanvasState(activeCanvas);
-    arrowLine=null;arrowStart=null;activeCanvas=null;setActiveTool('select');
+    arrowLine=null;arrowStart=null;activeCanvas=null;
 }
 
 function handleTextPlacement(c,o){
     if(activeTool!=='text'||o.target)return;
-    const p=c.getPointer(o.e),txt=new fabric.IText('Your Text Here',{
-        left:p.x,top:p.y,fontFamily:currentFontFamily,fontSize:currentFontSize,fill:'#333',selectable:true,evented:true
+    const p=c.getPointer(o.e),txt=new fabric.IText('',{
+        left:p.x,top:p.y,fontFamily:currentFontFamily,fontSize:currentFontSize,fill:'red',selectable:true,evented:true
     });
-    c.add(txt);c.setActiveObject(txt);txt.enterEditing();saveCanvasState(c);setActiveTool('select');
+    c.add(txt);c.setActiveObject(txt);txt.enterEditing();saveCanvasState(c);
 }
 
 function updateSelectedObjectProperties(){
@@ -199,17 +264,42 @@ async function renderPage(n){
         const w=Math.min(window.innerWidth-100,1400);
         scale=w/vp.width;
         const sv=pg.getViewport({scale});
+        
         const cont=document.createElement('div');
-        cont.className='pdf-page-container';cont.style.width=`${sv.width}px`;cont.dataset.pageNum=n;
+        cont.className='pdf-page-container';
+        cont.style.width=`${sv.width}px`;
+        cont.style.height=`${sv.height}px`;
+        cont.dataset.pageNum=n;
+        
         const pdfC=document.createElement('canvas');
-        pdfC.className='pdf-viewer-canvas';pdfC.width=sv.width;pdfC.height=sv.height;
+        pdfC.className='pdf-viewer-canvas';
+        pdfC.width=sv.width;
+        pdfC.height=sv.height;
+        pdfC.style.width=`${sv.width}px`;
+        pdfC.style.height=`${sv.height}px`;
         cont.appendChild(pdfC);
         await pg.render({canvasContext:pdfC.getContext('2d'),viewport:sv}).promise;
+        
+        pdfViewer.appendChild(cont);
+        
         const fabEl=document.createElement('canvas');
-        fabEl.className='fabric-canvas';fabEl.width=sv.width;fabEl.height=sv.height;fabEl.id=`fabric-canvas-${n}`;
+        fabEl.id=`fabric-canvas-${n}`;
+        fabEl.style.position='absolute';
+        fabEl.style.top='0';
+        fabEl.style.left='0';
         cont.appendChild(fabEl);
-        const fc=new fabric.Canvas(fabEl,{selection:true,isDrawingMode:false});
-        fc.freeDrawingBrush=new fabric.PencilBrush(fc);fc.freeDrawingBrush.color='red';fc.freeDrawingBrush.width=3;
+        
+        const fc=new fabric.Canvas(fabEl,{
+            selection:true,
+            isDrawingMode:false,
+            width:sv.width,
+            height:sv.height
+        });
+        
+        fc.freeDrawingBrush=new fabric.PencilBrush(fc);
+        fc.freeDrawingBrush.color='red';
+        fc.freeDrawingBrush.width=3;
+        
         saveCanvasState(fc);
         fc.on('object:modified',()=>saveCanvasState(fc));
         fc.on('object:removed',()=>saveCanvasState(fc));
@@ -227,36 +317,99 @@ async function renderPage(n){
             if(isPanning){isPanning=false;fc.defaultCursor=activeTool==='draw'?'crosshair':'default';}
             else handleArrowEnd();
         });
-        fabEl.addEventListener('contextmenu',e=>e.preventDefault());
+        
+        cont.addEventListener('contextmenu',e=>e.preventDefault());
+        
         const delH=e=>{
             if(e.key==='Delete'||e.key==='Backspace'){
                 const ao=fc.getActiveObject();
-                if(ao&&!(ao.type==='i-text'&&ao.isEditing)){fc.remove(ao);saveCanvasState(fc);fc.discardActiveObject().renderAll();e.preventDefault();}
+                if(ao&&!(ao.type==='i-text'&&ao.isEditing)){
+                    if(ao.type==='activeSelection'){
+                        ao.forEachObject(obj=>fc.remove(obj));
+                        fc.discardActiveObject();
+                    }else{
+                        fc.remove(ao);
+                    }
+                    saveCanvasState(fc);
+                    fc.renderAll();
+                    e.preventDefault();
+                }
             }
         };
-        fc._deleteHandler=delH;document.addEventListener('keydown',delH);
-        fabricCanvases.set(n,fc);pdfViewer.appendChild(cont);setActiveTool(activeTool);
+        
+        fc._deleteHandler=delH;
+        document.addEventListener('keydown',delH);
+        fabricCanvases.set(n,fc);
+        setActiveTool(activeTool);
     }catch(err){console.error(`Error page ${n}:`,err);}
 }
 
 async function renderAllPages(){
     if(!pdfDoc)return;
+    
+    // Clear the viewer completely
     pdfViewer.innerHTML='';
-    fabricCanvases.forEach(c=>{if(c._deleteHandler)document.removeEventListener('keydown',c._deleteHandler);c.dispose();});
-    fabricCanvases.clear();currentZoom=1;panOffsetX=0;panOffsetY=0;pdfViewer.style.transform='translate(0,0)';
-    for(let i=1;i<=numPages;i++)await renderPage(i);
+    
+    // Clean up old event listeners and dispose canvases
+    fabricCanvases.forEach(c=>{
+        if(c._deleteHandler){
+            document.removeEventListener('keydown',c._deleteHandler);
+        }
+        try{
+            c.dispose();
+        }catch(e){
+            console.log('Canvas dispose error:',e);
+        }
+    });
+    
+    fabricCanvases.clear();
+    
+    // Reset zoom and pan
+    currentZoom=1;
+    panOffsetX=0;
+    panOffsetY=0;
+    pdfViewer.style.transform='translate(0,0)';
+    
+    // Render all pages
+    for(let i=1;i<=numPages;i++){
+        await renderPage(i);
+    }
 }
 
 async function loadPDF(f){
-    document.getElementById('initialMessage').style.display='none';
-    document.getElementById('loadingMessage').style.display='block';
+    const initialMessage = document.getElementById('initialMessage');
+    const loadingMessage = document.getElementById('loadingMessage');
+    
+    if(initialMessage) initialMessage.style.display='none';
+    if(loadingMessage) loadingMessage.style.display='block';
+    
     btnSavePdf.disabled=true;
+    
     try{
+        // Clean up old PDF document
+        if(pdfDoc){
+            pdfDoc.destroy();
+            pdfDoc = null;
+        }
+        
         const ab=await f.arrayBuffer();
         pdfDoc=await pdfjsLib.getDocument({data:new Uint8Array(ab)}).promise;
-        numPages=pdfDoc.numPages;await renderAllPages();btnSavePdf.disabled=false;
-    }catch(e){console.error('Load err:',e);pdfViewer.innerHTML=`<div class="text-red-600 p-8">Error: ${e.message}</div>`;}
-    finally{document.getElementById('loadingMessage').style.display='none';}
+        numPages=pdfDoc.numPages;
+        
+        console.log('Loading new PDF with',numPages,'pages');
+        
+        await renderAllPages();
+        btnSavePdf.disabled=false;
+        hasUnsavedChanges=false;
+        
+        showTemporaryMessage(`PDF loaded: ${numPages} page(s)`);
+    }catch(e){
+        console.error('Load err:',e);
+        pdfViewer.innerHTML=`<div class="text-red-600 p-8">Error: ${e.message}</div>`;
+    }finally{
+        if(loadingMessage) loadingMessage.style.display='none';
+        fileInput.value='';
+    }
 }
 
 async function saveAllPagesAsPDF(){
@@ -282,7 +435,9 @@ async function saveAllPagesAsPDF(){
             if(!first)doc.addPage([pwm,phm],pwm>phm?'l':'p');
             doc.addImage(fd,'JPEG',0,0,pwm,phm);first=false;
         }
-        doc.save('annotated_document.pdf');showTemporaryMessage("PDF saved!");
+        doc.save('annotated_document.pdf');
+        showTemporaryMessage("PDF saved!");
+        hasUnsavedChanges=false;
     }catch(err){console.error('Save err:',err);showTemporaryMessage(`Error: ${err.message}`);}
     finally{btnSavePdf.disabled=false;btnSavePdf.textContent='Save PDF';}
 }
@@ -304,8 +459,19 @@ pdfViewer.addEventListener('wheel',e=>{
 },{passive:false});
 
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='z'){e.preventDefault();undo();}});
-btnLoadPdf.addEventListener('click',()=>fileInput.click());
-fileInput.addEventListener('change',e=>{const f=e.target.files[0];if(f&&f.type==='application/pdf')loadPDF(f);else if(f)showTemporaryMessage("Not a PDF");});
+btnLoadPdf.addEventListener('click',()=>{
+    if(hasUnsavedChanges&&pdfDoc){
+        const confirmed=confirm('This file has unsaved changes. Are you sure you want to replace it? All annotations will be lost.');
+        if(!confirmed)return;
+    }
+    fileInput.click();
+});
+
+fileInput.addEventListener('change',e=>{
+    const f=e.target.files[0];
+    if(f&&f.type==='application/pdf')loadPDF(f);
+    else if(f)showTemporaryMessage("Not a PDF");
+});
 document.querySelectorAll('.tool-btn').forEach(b=>b.addEventListener('click',()=>{if(b.dataset.tool)setActiveTool(b.dataset.tool);}));
 btnSavePdf.addEventListener('click',saveAllPagesAsPDF);
 fontSizeInput.addEventListener('input',()=>{currentFontSize=parseInt(fontSizeInput.value)||12;updateSelectedObjectProperties();});
@@ -313,5 +479,7 @@ fontFamilySelect.addEventListener('change',()=>{currentFontFamily=fontFamilySele
 setActiveTool('select');currentFontSize=parseInt(fontSizeInput.value);currentFontFamily=fontFamilySelect.value;
 fontSizeInput.disabled=true;fontFamilySelect.disabled=true;
 </script>
+</div>
+
 </body>
 </html>
