@@ -702,9 +702,11 @@ function updateVisiblePage(){
 // ─── CANVAS RENDERING ───────────────────────────────
 async function renderPage(n,containerOverride=null){
     let cont=null;
+    let markedRendering=false;
     try{
         if(renderedPages.has(n)||renderingPages.has(n))return null;
         renderingPages.add(n);
+        markedRendering=true;
         const pg=await pdfDoc.getPage(n),vp=pg.getViewport({scale:1});
         if(baseScale===null){
             const w=Math.min(window.innerWidth-40-256,1600);
@@ -816,7 +818,7 @@ async function renderPage(n,containerOverride=null){
         if(pageRenderObserver)pageRenderObserver.unobserve(cont);
         return {width:dw,height:dh};
     }catch(err){console.error(`Error page ${n}:`,err);}
-    finally{renderingPages.delete(n);}
+    finally{if(markedRendering)renderingPages.delete(n);}
 }
 
 async function renderAllPages(){
@@ -826,7 +828,7 @@ async function renderAllPages(){
     if(pageRenderObserver)pageRenderObserver.disconnect();
     pageRenderObserver=null;renderedPages.clear();renderingPages.clear();fabricCanvases.clear();
     savedStateByPage.clear();historyStack.length=0;historyPointer=-1;hasPendingTextEdits=false;hasUnsavedChanges=false;
-    panOffsetX=0;panOffsetY=0;pdfViewer.style.transform='translate(0,0)';
+    isPanning=false;panOffsetX=0;panOffsetY=0;pdfViewer.style.transform='translate(0,0)';
     currentVisiblePage=1;baseScale=null;
     let ph=defaultPageSize.h||800;
     const eager=Math.min(2,numPages);
@@ -898,11 +900,23 @@ async function saveAllPagesAsPDF(){
             const a=c.getActiveObject();
             if(a&&a.isEditing&&a.exitEditing){a.exitEditing();c.discardActiveObject();c.renderAll();}
         });
+        syncPendingTextEdits();
 
-        const {PDFDocument,StandardFonts,rgb}=window.PDFLib;
-        const baseDoc=await PDFDocument.load(originalPdfBytes);
+        const {PDFDocument,StandardFonts,rgb,degrees}=window.PDFLib;
+        let baseDoc;
+        try{baseDoc=await PDFDocument.load(originalPdfBytes);}
+        catch(e){baseDoc=await PDFDocument.load(originalPdfBytes,{ignoreEncryption:true});}
         const helv=await baseDoc.embedFont(StandardFonts.Helvetica);
         const helvBold=await baseDoc.embedFont(StandardFonts.HelveticaBold);
+        const timesRoman=await baseDoc.embedFont(StandardFonts.TimesRoman);
+        const timesBold=await baseDoc.embedFont(StandardFonts.TimesRomanBold);
+        const courier=await baseDoc.embedFont(StandardFonts.Courier);
+        const courierBold=await baseDoc.embedFont(StandardFonts.CourierBold);
+        function pickFont(ff,bold){
+            if(ff==='serif') return bold?timesBold:timesRoman;
+            if(ff==='monospace') return bold?courierBold:courier;
+            return bold?helvBold:helv;
+        }
         const conts=Array.from(document.querySelectorAll('.pdf-page-container')).sort((a,b)=>parseInt(a.dataset.pageNum)-parseInt(b.dataset.pageNum));
 
         function fabricColorToPdfColor(colorStr){
@@ -922,41 +936,76 @@ async function saveAllPagesAsPDF(){
             return rgb(1,0,0);
         }
 
-        function drawTextObject(obj,page,pageWidth,pageHeight,pxW,pxH){
+        function drawTextObject(obj,page,pageW,pageH,rot,pxW,pxH){
             if(!obj.text||!obj.text.trim())return;
             const color=fabricColorToPdfColor(obj.fill);
-            const effFontSize=obj.fontSize*(obj.scaleY||1);
-            const size=effFontSize*(pageWidth/pxW);
-            const baseX=obj.left/pxW*pageWidth;
-            const baseY=pageHeight-((obj.top+effFontSize)/pxH*pageHeight);
-            const lh=(obj.lineHeight||1.16)*size;
+            const matrix=obj.calcTransformMatrix();
+            const tp=(lx,ly)=>{
+                const p=fabric.util.transformPoint(new fabric.Point(lx,ly),matrix);
+                const nx=p.x/pxW,ny=p.y/pxH;
+                switch(rot){
+                    case 90:  return {x:ny*pageW,y:nx*pageH};
+                    case 180: return {x:(1-nx)*pageW,y:ny*pageH};
+                    case 270: return {x:(1-ny)*pageW,y:(1-nx)*pageH};
+                    default:  return {x:nx*pageW,y:(1-ny)*pageH};
+                }
+            };
+            const origin=tp(0,0),xAxis=tp(1,0),yAxis=tp(0,1);
+            const xVec={x:xAxis.x-origin.x,y:xAxis.y-origin.y};
+            const yVec={x:yAxis.x-origin.x,y:yAxis.y-origin.y};
+            const yScale=Math.hypot(yVec.x,yVec.y);
+            if(!Number.isFinite(yScale)||yScale===0)return;
+            const angle=Math.atan2(xVec.y,xVec.x)*180/Math.PI;
+            const baseFontSize=obj.fontSize||12;
+            const size=baseFontSize*yScale;
+            const lineHeight=(obj.lineHeight||1.16)*baseFontSize;
+            const opacity=obj.opacity!==undefined?obj.opacity:1;
+            const w2=obj.width/2,h2=obj.height/2;
             (obj.text||'').split(/\r?\n/).forEach((line,idx)=>{
-                page.drawText(line,{x:baseX,y:baseY-(idx*lh),size,font:obj.fontWeight==='bold'?helvBold:helv,color});
+                const baseline=tp(-w2,-h2+baseFontSize+(idx*lineHeight));
+                page.drawText(line,{
+                    x:baseline.x,
+                    y:baseline.y,
+                    size,
+                    font:pickFont(obj.fontFamily,obj.fontWeight==='bold'),
+                    color,
+                    rotate:degrees(angle),
+                    opacity
+                });
             });
         }
 
         // ── Vector annotation export ──
         // Converts each fabric object to pdf-lib drawing commands (no rasterization)
-        function drawVectorAnnotation(obj,page,pw,ph,pxW,pxH){
-            const sx=pw/pxW, sy=ph/pxH, type=obj.type;
+        function drawVectorAnnotation(obj,page,pageW,pageH,rot,pxW,pxH){
+            const type=obj.type;
             if(type==='i-text'||type==='textbox'||obj.visible===false) return;
 
-            // Groups (arrows): recurse into children
             if(type==='group'){
-                (obj._objects||[]).forEach(ch=>drawVectorAnnotation(ch,page,pw,ph,pxW,pxH));
+                (obj._objects||[]).forEach(ch=>drawVectorAnnotation(ch,page,pageW,pageH,rot,pxW,pxH));
                 return;
             }
 
             const matrix=obj.calcTransformMatrix();
-            // Transform local point → absolute canvas → PDF coordinates
+            // Map local coords → canvas pixels → raw MediaBox SVG Y-down coords
+            // pdf-lib does NOT handle rotation, so we manually remap visual→raw coords
             const tp=(lx,ly)=>{
                 const p=fabric.util.transformPoint(new fabric.Point(lx,ly),matrix);
-                return {x:p.x*sx, y:ph-p.y*sy};
+                const nx=p.x/pxW,ny=p.y/pxH;
+                switch(rot){
+                    case 90:  return {x:ny*pageW,y:(1-nx)*pageH};
+                    case 180: return {x:(1-nx)*pageW,y:(1-ny)*pageH};
+                    case 270: return {x:(1-ny)*pageW,y:nx*pageH};
+                    default:  return {x:nx*pageW,y:ny*pageH};
+                }
             };
 
             const sCol=obj.stroke?fabricColorToPdfColor(obj.stroke):null;
             const fCol=(obj.fill&&obj.fill!=='transparent'&&obj.fill!=='')?fabricColorToPdfColor(obj.fill):null;
-            const sw=(obj.strokeWidth||0)*(sx+sy)/2;
+            const p0=tp(0,0),px=tp(1,0),py=tp(0,1);
+            const localScaleX=Math.hypot(px.x-p0.x,px.y-p0.y);
+            const localScaleY=Math.hypot(py.x-p0.x,py.y-p0.y);
+            const sw=(obj.strokeWidth||0)*((localScaleX+localScaleY)/2);
             const op=obj.opacity!==undefined?obj.opacity:1;
             let d='', wantFill=false;
 
@@ -1032,6 +1081,7 @@ async function saveAllPagesAsPDF(){
             if(sCol&&sw>0){opts.borderColor=sCol;opts.borderWidth=sw;opts.borderOpacity=op;}
             if(fCol&&wantFill){opts.color=fCol;opts.opacity=op;}
             if(!opts.borderColor&&!opts.color) return;
+            opts.x=0; opts.y=pageH;
             try{page.drawSvgPath(d.trim(),opts);}
             catch(e){console.warn('[Save] drawSvgPath failed:',type,e.message);}
         }
@@ -1043,24 +1093,33 @@ async function saveAllPagesAsPDF(){
             const objs=fc.getObjects();
             if(objs.length===0)continue;
             const page=baseDoc.getPage(pn-1);
-            const pw=page.getWidth(),ph=page.getHeight();
+            const pageW=page.getWidth(),pageH=page.getHeight();
+            const rot=page.getRotation().angle;
             const pxW=fc.getWidth(),pxH=fc.getHeight();
 
             objs.forEach(obj=>{
                 if(obj.type==='i-text'||obj.type==='textbox')
-                    drawTextObject(obj,page,pw,ph,pxW,pxH);
+                    drawTextObject(obj,page,pageW,pageH,rot,pxW,pxH);
                 else
-                    drawVectorAnnotation(obj,page,pw,ph,pxW,pxH);
+                    drawVectorAnnotation(obj,page,pageW,pageH,rot,pxW,pxH);
             });
         }
 
         const pdfBytes=await baseDoc.save({useObjectStreams:false});
         const blob=new Blob([pdfBytes],{type:'application/pdf'});
-        const saveName=currentFileName?currentFileName.replace('.pdf','_annotated.pdf'):'annotated_document.pdf';
+        const sourceName=currentFileName||'annotated_document';
+        const saveName=/\.pdf$/i.test(sourceName)?sourceName.replace(/\.pdf$/i,'_annotated.pdf'):`${sourceName}_annotated.pdf`;
         const link=document.createElement('a');
         link.href=URL.createObjectURL(blob);link.download=saveName;link.click();
         setTimeout(()=>URL.revokeObjectURL(link.href),2000);
-        showMsg("PDF saved!");hasUnsavedChanges=false;
+        fabricCanvases.forEach((c,pn)=>{
+            const state=getSerializedCanvasState(c);
+            c._lastSavedState=state;
+            savedStateByPage.set(pn,state);
+        });
+        hasPendingTextEdits=false;
+        recomputeUnsavedChanges();
+        showMsg("PDF saved!");
     }catch(err){console.error('Save err:',err);showMsg(`Error: ${err.message}`);}
     finally{btnSavePdf.disabled=false;btnSavePdf.textContent='Save PDF';}
 }
@@ -1131,11 +1190,16 @@ document.addEventListener('keydown',e=>{
 });
 
 // ─── EVENT LISTENERS ────────────────────────────────
+window.addEventListener('mouseup',stopPanning);
+window.addEventListener('blur',stopPanning);
+
 window.addEventListener('beforeunload',e=>{
+    recomputeUnsavedChanges();
     if(hasUnsavedChanges){e.preventDefault();e.returnValue='Unsaved changes';return e.returnValue;}
 });
 
 btnLoadPdf.addEventListener('click',()=>{
+    recomputeUnsavedChanges();
     if(hasUnsavedChanges&&pdfDoc){
         if(!confirm('Unsaved changes will be lost. Continue?'))return;
     }
@@ -1144,7 +1208,8 @@ btnLoadPdf.addEventListener('click',()=>{
 
 fileInput.addEventListener('change',e=>{
     const f=e.target.files[0];
-    if(f&&f.type==='application/pdf')loadPDF(f);
+    const isPdf=!!f&&(((f.type||'').toLowerCase()==='application/pdf')||/\.pdf$/i.test(f.name||''));
+    if(isPdf)loadPDF(f);
     else if(f)showMsg("Not a PDF");
 });
 
