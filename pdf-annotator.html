@@ -555,6 +555,7 @@ let shapeFillEnabled=false;
 let shapeFillOpacity=25;
 let activeContextPageNum=1;
 const activePdfRenderTasks=new Map();
+const pendingPdfRefreshPages=new Set();
 let queuedZoomFactor=null;
 let zoomWorkerActive=false;
 
@@ -936,6 +937,7 @@ function createRevisionCloud(x,y,w,h){
     return new fabric.Path(d,{
         stroke:currentColor,strokeWidth:currentStrokeWidth,
         fill:getCurrentShapeFill(currentColor),selectable:true,evented:true,
+        strokeUniform:true,
         hasControls:true,hasBorders:true,annotationType:'cloud'
     });
 }
@@ -1178,6 +1180,7 @@ function createArrowGroup(x1,y1,x2,y2,mode='single'){
         stroke:currentColor,
         fill:currentColor,
         strokeLineCap:'round',
+        strokeUniform:true,
         selectable:false,
         evented:false
     });
@@ -1190,6 +1193,7 @@ function createArrowGroup(x1,y1,x2,y2,mode='single'){
         fill:currentColor,
         stroke:currentColor,
         strokeWidth:Math.max(1,currentStrokeWidth*0.35),
+        strokeUniform:true,
         selectable:false,
         evented:false
     };
@@ -1243,7 +1247,8 @@ function handleShapeStart(c,o){
         case 'line':case 'arrow':
             tempShape=new fabric.Line([p.x,p.y,p.x,p.y],{
                 strokeWidth:currentStrokeWidth,stroke:currentColor,fill:currentColor,
-                originX:'center',originY:'center',selectable:false,evented:false
+                originX:'center',originY:'center',selectable:false,evented:false,
+                strokeUniform:true
             });
             c.add(tempShape);
             break;
@@ -1251,7 +1256,7 @@ function handleShapeStart(c,o){
             tempShape=new fabric.Rect({
                 left:p.x,top:p.y,width:0,height:0,
                 stroke:currentColor,strokeWidth:currentStrokeWidth,fill:getCurrentShapeFill(currentColor),
-                selectable:false,evented:false
+                selectable:false,evented:false,strokeUniform:true
             });
             c.add(tempShape);
             break;
@@ -1259,7 +1264,7 @@ function handleShapeStart(c,o){
             tempShape=new fabric.Ellipse({
                 left:p.x,top:p.y,rx:0,ry:0,
                 stroke:currentColor,strokeWidth:currentStrokeWidth,fill:getCurrentShapeFill(currentColor),
-                selectable:false,evented:false
+                selectable:false,evented:false,strokeUniform:true
             });
             c.add(tempShape);
             break;
@@ -1267,7 +1272,7 @@ function handleShapeStart(c,o){
             tempShape=new fabric.Rect({
                 left:p.x,top:p.y,width:0,height:0,
                 stroke:currentColor,strokeWidth:currentStrokeWidth,fill:getCurrentShapeFill(currentColor),
-                strokeDashArray:[5,5],selectable:false,evented:false
+                strokeDashArray:[5,5],selectable:false,evented:false,strokeUniform:true
             });
             c.add(tempShape);
             break;
@@ -1276,7 +1281,7 @@ function handleShapeStart(c,o){
                 left:p.x,top:p.y,width:0,height:0,
                 stroke:getHighlightAreaStrokeColor(),strokeWidth:Math.max(1,currentStrokeWidth),
                 fill:getHighlightAreaFillColor(),
-                selectable:false,evented:false,annotationType:'highlightBox'
+                selectable:false,evented:false,annotationType:'highlightBox',strokeUniform:true
             });
             c.add(tempShape);
             break;
@@ -1285,7 +1290,7 @@ function handleShapeStart(c,o){
                 left:p.x,top:p.y,rx:0,ry:0,
                 stroke:getHighlightAreaStrokeColor(),strokeWidth:Math.max(1,currentStrokeWidth),
                 fill:getHighlightAreaFillColor(),
-                selectable:false,evented:false,annotationType:'highlightEllipse'
+                selectable:false,evented:false,annotationType:'highlightEllipse',strokeUniform:true
             });
             c.add(tempShape);
             break;
@@ -1501,6 +1506,11 @@ function goToPage(pageNum){
     updatePageIndicator();
     if(pageContainer){
         if(!renderedPages.has(target)&&!renderingPages.has(target))renderPage(target,pageContainer);
+        else if(renderedPages.has(target)&&pageContainer.dataset.pdfZoom!==getZoomKey(zoomFactor)){
+            ensurePagePdfLayerAtCurrentZoom(target,pageContainer,true).catch(err=>{
+                if(!isRenderCancelledError(err))console.error(`PDF rerender error page ${target}:`,err);
+            });
+        }
         pageContainer.scrollIntoView({behavior:'smooth',block:'start'});
     }
 }
@@ -1573,6 +1583,52 @@ async function renderPdfCanvasLayer(pageNum,page,pdfCanvas,viewport){
 }
 
 // ─── CANVAS RENDERING ───────────────────────────────
+const PDF_REFRESH_MARGIN_PX=900;
+
+function isContainerNearViewport(container,margin=PDF_REFRESH_MARGIN_PX){
+    if(!container)return false;
+    const rect=container.getBoundingClientRect();
+    return rect.bottom>=-margin&&rect.top<=(window.innerHeight+margin);
+}
+
+async function ensurePagePdfLayerAtCurrentZoom(pageNum,container,force=false){
+    if(!pdfDoc||!container)return false;
+    const desiredZoom=zoomFactor;
+    const desiredKey=getZoomKey(desiredZoom);
+    if(!force&&container.dataset.pdfZoom===desiredKey)return true;
+    if(pendingPdfRefreshPages.has(pageNum))return false;
+
+    const pdfCanvas=container.querySelector('.pdf-viewer-canvas');
+    if(!pdfCanvas)return false;
+
+    pendingPdfRefreshPages.add(pageNum);
+    try{
+        const page=await pdfDoc.getPage(pageNum);
+        // Abort stale rerenders if zoom changed mid-flight.
+        if(Math.abs(zoomFactor-desiredZoom)>0.001)return false;
+
+        const dpr=window.devicePixelRatio||1;
+        const viewport=page.getViewport({scale:scale*dpr});
+        const displayWidth=viewport.width/dpr;
+        const displayHeight=viewport.height/dpr;
+
+        container.style.width=`${displayWidth}px`;
+        container.style.height=`${displayHeight}px`;
+        container.style.minHeight=`${displayHeight}px`;
+        pdfCanvas.width=viewport.width;
+        pdfCanvas.height=viewport.height;
+        pdfCanvas.style.width=`${displayWidth}px`;
+        pdfCanvas.style.height=`${displayHeight}px`;
+
+        const didRender=await renderPdfCanvasLayer(pageNum,page,pdfCanvas,viewport);
+        if(!didRender)return false;
+        if(Math.abs(zoomFactor-desiredZoom)<=0.001)container.dataset.pdfZoom=desiredKey;
+        return true;
+    }finally{
+        pendingPdfRefreshPages.delete(pageNum);
+    }
+}
+
 async function renderPage(n,containerOverride=null){
     let cont=null;
     let markedRendering=false;
@@ -1638,7 +1694,7 @@ async function renderPage(n,containerOverride=null){
         fc.on('path:created',e=>{
             if(e.path){
                 const canSelect=activeTool==='select';
-                e.path.set({selectable:canSelect,evented:canSelect,hasControls:true,hasBorders:true});
+                e.path.set({selectable:canSelect,evented:canSelect,hasControls:true,hasBorders:true,strokeUniform:true});
                 if(activeTool==='highlight'&&highlightMode==='pen'){
                     e.path.set({opacity:1,annotationType:'highlightPen'});
                 }
@@ -1714,7 +1770,10 @@ async function renderPage(n,containerOverride=null){
         cont.addEventListener('contextmenu',e=>e.preventDefault());
 
         fabricCanvases.set(n,fc);
-        fc._renderZoom=zoomFactor; // remember zoom at render time for viewport transform
+        // Keep all canvases in a shared base coordinate space so annotations stay
+        // consistent across pages rendered at different times/zooms.
+        fc._renderZoom=1;
+        fc.setViewportTransform([zoomFactor,0,0,zoomFactor,0,0]);
         // Lightweight init for this canvas only (no showMsg, no reconfiguring all canvases)
         fc.selection=activeTool==='select';
         fc.isDrawingMode=isFreeDrawModeTool(activeTool);
@@ -1766,13 +1825,19 @@ async function renderAllPages(){
         entries.forEach(entry=>{
             if(entry.isIntersecting){
                 const pNum=parseInt(entry.target.dataset.pageNum,10);
-                if(!renderedPages.has(pNum)&&!renderingPages.has(pNum))renderPage(pNum,entry.target);
+                if(!renderedPages.has(pNum)&&!renderingPages.has(pNum)){
+                    renderPage(pNum,entry.target);
+                }else if(renderedPages.has(pNum)&&entry.target.dataset.pdfZoom!==getZoomKey(zoomFactor)){
+                    ensurePagePdfLayerAtCurrentZoom(pNum,entry.target).catch(err=>{
+                        if(!isRenderCancelledError(err))console.error(`PDF rerender error page ${pNum}:`,err);
+                    });
+                }
             }
         });
     },{root:null,rootMargin:'200px 0px',threshold:0.05});
 
     document.querySelectorAll('.pdf-page-container').forEach(el=>{
-        if(!renderedPages.has(parseInt(el.dataset.pageNum,10)))pageRenderObserver.observe(el);
+        pageRenderObserver.observe(el);
     });
     updatePageIndicator();
 }
@@ -2498,25 +2563,14 @@ async function applyZoom(newFactor){
     const fitScale=getTargetPageWidth(vp1.width);
     baseScale=fitScale*zoomFactor;
     scale=baseScale;
-    const zoomKey=getZoomKey(zoomFactor);
     const fallbackViewport=pageViewportCache.get(1)||{width:vp1.width,height:vp1.height};
 
-    const dpr=window.devicePixelRatio||1;
     for(const [n,fc] of fabricCanvases){
-        const pg=await pdfDoc.getPage(n);
-        const rv=pg.getViewport({scale:scale*dpr});
-        const dw=rv.width/dpr,dh=rv.height/dpr;
+        const vp=pageViewportCache.get(n)||fallbackViewport;
+        const dw=vp.width*scale,dh=vp.height*scale;
 
         const cont=document.querySelector(`[data-page-num="${n}"]`);
         if(cont){cont.style.width=`${dw}px`;cont.style.height=`${dh}px`;cont.style.minHeight=`${dh}px`;}
-
-        const pdfC=cont?cont.querySelector('.pdf-viewer-canvas'):null;
-        if(pdfC){
-            pdfC.width=rv.width;pdfC.height=rv.height;
-            pdfC.style.width=`${dw}px`;pdfC.style.height=`${dh}px`;
-            const didRenderPdf=await renderPdfCanvasLayer(n,pg,pdfC,rv);
-            if(didRenderPdf&&cont)cont.dataset.pdfZoom=zoomKey;
-        }
 
         const renderZoom=fc._renderZoom||1;
         const vptRatio=zoomFactor/renderZoom;
@@ -2525,6 +2579,22 @@ async function applyZoom(newFactor){
         fc.calcOffset();
         fc.requestRenderAll();
         pageSizeMap.set(n,{w:dw,h:dh});
+
+        if(cont&&isContainerNearViewport(cont)){
+            try{
+                await ensurePagePdfLayerAtCurrentZoom(n,cont,true);
+            }catch(err){
+                if(!isRenderCancelledError(err))console.error(`PDF rerender error page ${n}:`,err);
+            }
+        }else if(cont){
+            const pdfC=cont.querySelector('.pdf-viewer-canvas');
+            if(pdfC){
+                // Fast path for distant pages: resize display now, rerender PDF when page
+                // comes back near viewport (observer/goToPage).
+                pdfC.style.width=`${dw}px`;
+                pdfC.style.height=`${dh}px`;
+            }
+        }
     }
 
     for(let i=1;i<=numPages;i++){
@@ -2533,7 +2603,7 @@ async function applyZoom(newFactor){
             if(cont){
                 const vp=pageViewportCache.get(i)||fallbackViewport;
                 const dw=vp.width*scale,dh=vp.height*scale;
-                cont.style.width=`${dw}px`;cont.style.minHeight=`${dh}px`;
+                cont.style.width=`${dw}px`;cont.style.height=`${dh}px`;cont.style.minHeight=`${dh}px`;
             }
         }
     }
@@ -2542,6 +2612,7 @@ async function applyZoom(newFactor){
         const maxScroll=Math.max(1,scrollEl.scrollHeight-scrollEl.clientHeight);
         scrollEl.scrollTop=scrollRatio*maxScroll;
     }
+    updateVisiblePage();
 }
 
 let _zoomRetries=0;
