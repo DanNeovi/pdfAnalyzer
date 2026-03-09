@@ -102,7 +102,7 @@
         }
         #pageIndicator { transition: opacity 0.2s ease; }
         .divider { width: 1px; height: 24px; background: #d1d5db; margin: 0 4px; flex-shrink: 0; }
-        #sizeSlider { accent-color: #4f46e5; }
+
 
         .rainbow-btn {
             width: 24px; height: 24px; border-radius: 6px; cursor: pointer; flex-shrink: 0;
@@ -406,7 +406,7 @@
     <div class="flex items-center justify-between px-4 py-1.5 border-b border-gray-100">
         <div class="flex items-center gap-3 min-w-0">
             <h1 class="text-xl font-extrabold text-gray-900"><span class="text-indigo-600">Draft</span>Annotator</h1>
-            <div id="fileNameDisplay" class="hidden items-center gap-2 bg-gradient-to-r from-indigo-50 to-purple-50 px-3 py-1 rounded-lg border border-indigo-200 min-w-0 flex-shrink">
+            <div id="fileNameDisplay" class="hidden items-center gap-2 bg-gradient-to-r from-indigo-50 to-purple-50 px-3 py-1 rounded-lg border border-indigo-200 min-w-0 shrink">
                 <svg class="w-4 h-4 text-indigo-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
                 </svg>
@@ -556,7 +556,7 @@
         <div class="divider"></div>
 
         <!-- Zoom controls -->
-        <div class="zoom-controls" id="zoomControls">
+        <div class="zoom-controls">
             <button type="button" class="zoom-btn" id="btnZoomOut" title="Zoom out (Ctrl+-)">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
             </button>
@@ -4230,7 +4230,7 @@ if('serviceWorker' in navigator){
     navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(reg=>{
         reg.update().catch(()=>{});
         if(reg.waiting&&navigator.serviceWorker.controller){
-            showMsg('App updated â€” reload for latest version');
+            showMsg('App updated — reload for latest version');
         }
         reg.addEventListener('updatefound',()=>{
             const nw=reg.installing;
