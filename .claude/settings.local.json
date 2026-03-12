@@ -3,7 +3,9 @@
     "allow": [
       "WebFetch(domain:cdn.jsdelivr.net)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebSearch",
+      "WebFetch(domain:api.iconify.design)"
     ]
   }
 }
