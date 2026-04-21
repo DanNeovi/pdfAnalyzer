@@ -4277,28 +4277,23 @@ async function initializeDraftReviewMode(){
     }
 }
 
+// This is a plain web page, not an installable PWA. Unregister any
+// service worker that a previous version may have registered, and nuke the
+// old caches so users get fresh HTML/JS directly from the server.
 if('serviceWorker' in navigator){
-    const disableServiceWorker=isDraftReviewMode()||/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname);
-    if(disableServiceWorker){
-        navigator.serviceWorker.getRegistrations().then(registrations=>{
-            registrations.forEach(reg=>reg.unregister().catch(()=>{}));
+    navigator.serviceWorker.getRegistrations().then(regs=>{
+        regs.forEach(r=>r.unregister().catch(()=>{}));
+    }).catch(()=>{});
+    if(window.caches&&caches.keys){
+        caches.keys().then(keys=>{
+            keys.forEach(k=>{ if(/draftannotator/i.test(k))caches.delete(k).catch(()=>{}); });
         }).catch(()=>{});
-    }else{
-    navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(reg=>{
-        reg.update().catch(()=>{});
-        if(reg.waiting&&navigator.serviceWorker.controller){
-            showMsg('App updated — reload for latest version');
-        }
-        reg.addEventListener('updatefound',()=>{
-            const nw=reg.installing;
-            if(nw) nw.addEventListener('statechange',()=>{
-                if(nw.state==='activated'&&navigator.serviceWorker.controller)
-                    showMsg('App updated — reload for latest version');
-            });
-        });
-    }).catch(e=>console.warn('SW registration failed:',e));
     }
 }
+
+// Belt-and-suspenders: some browsers still try to show an install banner if
+// they've seen the site as a PWA before. Swallow the event silently.
+window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
 
 // ─── BUILD INFO ────────────────────────────────────
 {
