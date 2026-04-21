@@ -1252,6 +1252,7 @@ function restoreEditingTextStates(states,{resumeEditing=false}={}){
 }
 
 function configureFabricTextDefaults(){
+    if(typeof fabric==='undefined')return;
     const textClasses=[fabric.Text,fabric.IText,fabric.Textbox];
     textClasses.forEach(Klass=>{
         if(!Klass||!Klass.prototype)return;
@@ -4305,7 +4306,7 @@ if('serviceWorker' in navigator){
     if(bd){
         // Show when this HTML file was last fetched/cached by the SW.
         // On first load it's "just now"; after that it reflects the cache age.
-        const built='2026-04-13';
+        const built='2026-04-20';
         bd.textContent='Built '+built;
     }
 }

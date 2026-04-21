@@ -3,7 +3,7 @@
 // and its CORS policy rejects cross-origin preloads from GitHub Pages,
 // triggering "Failed to execute 'addAll' on 'Cache'" errors on every install.
 // Tailwind is now loaded inline by the HTML and works fine without SW caching.
-const CACHE_NAME = 'draftannotator-v13';
+const CACHE_NAME = 'draftannotator-v14';
 const APP_SHELL = [
     './',
     './pdf-annotator.html',

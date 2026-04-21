@@ -131,6 +131,19 @@
             max-width: 200px; overflow: hidden;
             text-overflow: ellipsis; white-space: nowrap;
         }
+        /* Action buttons (Load / Undo / Redo / Save) — icon + label on desktop */
+        .action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.45rem;
+            flex-shrink: 0;
+        }
+        .action-btn .btn-icon { width: 16px; height: 16px; flex-shrink: 0; }
+        .header-actions { flex-shrink: 0; flex-wrap: nowrap; }
+        .header-top-row { flex-wrap: nowrap; }
+        .header-top-row > div:first-child { min-width: 0; }
+        header h1 { flex-shrink: 0; white-space: nowrap; }
         #pageIndicator { transition: opacity 0.2s ease; }
         .divider { width: 1px; height: 24px; background: #d1d5db; margin: 0 4px; flex-shrink: 0; }
 
@@ -407,17 +420,32 @@
             .mobile-menu-btn svg { width: 22px; height: 22px; }
 
             /* Slim header on mobile */
-            header .header-top-row { padding: 0.35rem 0.6rem; gap: 0.4rem; }
+            header .header-top-row { padding: 0.35rem 0.5rem; gap: 0.3rem; }
             header .header-tool-row { padding: 0.4rem 0.5rem; gap: 0.35rem; }
-            header h1 { font-size: 1rem; }
-            #fileNameDisplay { display: none !important; }
-            header .header-actions { gap: 0.35rem; }
-            header .header-actions button {
-                padding: 0.45rem 0.7rem !important;
-                font-size: 0.72rem !important;
+            header h1 {
+                font-size: 0.95rem;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                min-width: 0;
+                flex-shrink: 1;
             }
-            .settings-launcher { width: 36px; height: 36px; border-radius: 10px; }
+            #fileNameDisplay { display: none !important; }
+            header .header-actions { gap: 0.3rem; flex-shrink: 0; }
+            /* Collapse the four text action buttons to square icon buttons */
+            header .header-actions .action-btn {
+                padding: 0 !important;
+                width: 38px;
+                min-width: 38px;
+                height: 38px;
+                border-radius: 10px;
+                font-size: 0 !important;
+                gap: 0;
+            }
+            header .header-actions .action-btn .btn-label { display: none; }
+            header .header-actions .action-btn .btn-icon { width: 20px; height: 20px; }
+            .settings-launcher { width: 38px; height: 38px; border-radius: 10px; }
             .settings-launcher-icon { width: 22px; height: 22px; }
+            .mobile-menu-btn { width: 38px; height: 38px; }
 
             /* Bigger touch targets */
             .tool-btn { width: 40px; height: 40px; }
@@ -478,6 +506,14 @@
 
             /* Divider compact */
             .divider { margin: 0 2px; height: 20px; }
+        }
+        /* Extra-small phones: trim buttons a touch more */
+        @media (max-width: 400px) {
+            header h1 { font-size: 0.9rem; }
+            header .header-actions { gap: 0.25rem; }
+            header .header-actions .action-btn { width: 36px; min-width: 36px; height: 36px; }
+            .settings-launcher { width: 36px; height: 36px; }
+            .mobile-menu-btn { width: 36px; height: 36px; }
         }
     </style>
 </head>
@@ -540,9 +576,18 @@
             </div>
         </div>
         <div class="flex items-center gap-2 header-actions">
-            <button id="btnLoadPdf" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold py-2 px-5 rounded-lg transition-colors">Load PDF</button>
-            <button id="btnUndo" class="bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-bold py-2 px-4 rounded-lg border border-gray-300 transition-colors" type="button" title="Undo (Ctrl+Z)">Undo</button>
-            <button id="btnRedo" class="bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-bold py-2 px-4 rounded-lg border border-gray-300 transition-colors" type="button" title="Redo (Ctrl+Y)">Redo</button>
+            <button id="btnLoadPdf" class="action-btn bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-bold py-2 px-5 rounded-lg transition-colors" title="Load PDF" aria-label="Load PDF">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/></svg>
+                <span class="btn-label">Load PDF</span>
+            </button>
+            <button id="btnUndo" class="action-btn bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-bold py-2 px-4 rounded-lg border border-gray-300 transition-colors" type="button" title="Undo (Ctrl+Z)" aria-label="Undo">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14l-4-4 4-4"/><path d="M5 10h11a4 4 0 014 4v2"/></svg>
+                <span class="btn-label">Undo</span>
+            </button>
+            <button id="btnRedo" class="action-btn bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-bold py-2 px-4 rounded-lg border border-gray-300 transition-colors" type="button" title="Redo (Ctrl+Y)" aria-label="Redo">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l4-4-4-4"/><path d="M19 10H8a4 4 0 00-4 4v2"/></svg>
+                <span class="btn-label">Redo</span>
+            </button>
             <button id="btnShortcutSettings" class="settings-launcher" type="button" title="Settings" aria-label="Settings">
                 <span class="settings-launcher-icon">
                     <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -551,7 +596,10 @@
                     </svg>
                 </span>
             </button>
-            <button id="btnSavePdf" class="bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-bold py-2 px-5 rounded-lg disabled:opacity-50 transition-colors" disabled>Save PDF</button>
+            <button id="btnSavePdf" class="action-btn bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-bold py-2 px-5 rounded-lg disabled:opacity-50 transition-colors" title="Save PDF" aria-label="Save PDF" disabled>
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17,21 17,13 7,13 7,21"/><polyline points="7,3 7,8 15,8"/></svg>
+                <span class="btn-label">Save PDF</span>
+            </button>
         </div>
     </div>
     <!-- Bottom row: tools + controls -->
@@ -845,7 +893,7 @@
                 <div class="flex items-center justify-between flex-wrap gap-2">
                     <div class="flex items-center gap-3">
                         <span class="text-xs font-bold text-gray-400 uppercase tracking-wide">Draft Annotator</span>
-                        <span class="text-xs font-mono text-gray-400" id="buildVersion">v11</span>
+                        <span class="text-xs font-mono text-gray-400" id="buildVersion">v14</span>
                         <span class="text-xs text-gray-400" id="buildDate"></span>
                     </div>
                     <a href="https://github.com/DanNeovi/pdf-analyzer" target="_blank" rel="noopener noreferrer"
