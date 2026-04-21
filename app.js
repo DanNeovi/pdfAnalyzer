@@ -4392,9 +4392,8 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
 {
     const bd=document.getElementById('buildDate');
     if(bd){
-        // Show when this HTML file was last fetched/cached by the SW.
-        // On first load it's "just now"; after that it reflects the cache age.
-        const built='2026-04-21';
+        // Manually bumped each commit. Format: YYYY-MM-DD HH:MM TZ.
+        const built='2026-04-21 10:47 PDT';
         bd.textContent='Built '+built;
     }
 }
