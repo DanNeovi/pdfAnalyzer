@@ -1323,8 +1323,17 @@ function getHighlightAreaStrokeColor(){
     return 'transparent';
 }
 
-function getHighlightBrushWidth(){
-    return clampNumber(currentStrokeWidth*3,6,48);
+function getNormalizedControlStrokeWidth(width=currentStrokeWidth){
+    const numericWidth=Number(width);
+    const fallbackWidth=Number(currentStrokeWidth);
+    const resolvedWidth=Number.isFinite(numericWidth)
+        ? numericWidth
+        : (Number.isFinite(fallbackWidth)?fallbackWidth:1);
+    return clampNumber(resolvedWidth,1,maxStrokeSize);
+}
+
+function getHighlightBrushWidth(controlWidth=currentStrokeWidth){
+    return getNormalizedControlStrokeWidth(controlWidth)*3;
 }
 
 function isHighlightAreaObject(obj){
@@ -1663,7 +1672,7 @@ function setArrowGroupAppearance(group,strokeWidth,color){
     const line=parts.find(p=>p.type==='line');
     if(!line)return;
     const tips=parts.filter(p=>p.type==='triangle');
-    const sw=clampNumber(Number(strokeWidth)||currentStrokeWidth,1,72);
+    const sw=getNormalizedControlStrokeWidth(strokeWidth);
     const x1=Number(line.x1)||0;
     const y1=Number(line.y1)||0;
     const x2=Number(line.x2)||0;
@@ -1694,10 +1703,10 @@ function setObjectStrokeWidth(obj,width){
         return;
     }
     if(isHighlightPenObject(obj)){
-        obj.set('strokeWidth',clampNumber(width*3,6,48));
+        obj.set('strokeWidth',getHighlightBrushWidth(width));
         return;
     }
-    if(Object.prototype.hasOwnProperty.call(obj,'strokeWidth'))obj.set('strokeWidth',width);
+    if(Object.prototype.hasOwnProperty.call(obj,'strokeWidth'))obj.set('strokeWidth',getNormalizedControlStrokeWidth(width));
 }
 
 function applyTextStyleUpdate(obj,styleUpdate){
@@ -1928,15 +1937,6 @@ function syncSizeControl(){
     if(fontControlsGroup)fontControlsGroup.style.display=showTextControls?'flex':'none';
     fontFamilySelect.disabled=mode!=='text';
 
-    const highlightActive=activeTool==='highlight';
-    if(highlightActive){
-        sizeLabel.textContent='Size';
-        sizeSlider.value=currentStrokeWidth;
-        sizeNumber.value=currentStrokeWidth;
-        sizeSlider.disabled=false;
-        sizeNumber.disabled=false;
-        return;
-    }
     sizeSlider.disabled=false;
     sizeNumber.disabled=false;
 
@@ -1992,7 +1992,6 @@ function syncSizeControl(){
 }
 
 function handleSizeChange(val){
-    if(activeTool==='highlight')return;
     const context=getActiveSelectionContext();
     const mode=getSizeControlMode(context);
     if(mode==='text'){
