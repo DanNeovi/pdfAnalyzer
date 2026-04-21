@@ -1356,7 +1356,12 @@ function normalizeHighlightVisual(obj){
     if(obj._hlTempShape)return; // temp shape during drag: leave opacity:1 for live feedback
     const base=obj._hlBaseColor||(typeof obj.stroke==='string'&&obj.stroke)||currentColor;
     obj._hlBaseColor=base;
-    obj.set({opacity:0, strokeUniform:true});
+    // objectCaching:false is required because the flat-layer composite mutates
+    // fill/stroke/opacity on each frame to re-render at opaque color. With
+    // caching on, Rect/Ellipse would return the cached image from their last
+    // render (at rgba 35%) and overlapping boxes would still stack additively.
+    obj.set({opacity:0, strokeUniform:true, objectCaching:false});
+    obj.dirty=true;
     if(isHighlightPenObject(obj)){
         obj.set({stroke:getHighlightBrushColor(base), fill:''});
     }else{
@@ -1391,8 +1396,14 @@ function compositeHighlightLayer(fc,destCtx,{destWidth,destHeight,transform=null
         const savedStroke=obj.stroke;
         const savedFill=obj.fill;
         const savedStrokeWidth=obj.strokeWidth;
+        const savedCaching=obj.objectCaching;
         const base=obj._hlBaseColor||savedStroke||savedFill||currentColor;
         obj.opacity=1;
+        // Disable caching and force a dirty flag so Fabric ignores any stored
+        // render (which would have the rgba fill) and rebuilds with the opaque
+        // color we're swapping in for this pass.
+        obj.objectCaching=false;
+        obj.dirty=true;
         if(isHighlightPenObject(obj)){
             obj.stroke=base; obj.fill='';
         }else{
@@ -1405,6 +1416,8 @@ function compositeHighlightLayer(fc,destCtx,{destWidth,destHeight,transform=null
         obj.stroke=savedStroke;
         obj.fill=savedFill;
         obj.strokeWidth=savedStrokeWidth;
+        obj.objectCaching=savedCaching;
+        obj.dirty=true;
     });
     destCtx.save();
     destCtx.setTransform(1,0,0,1,0,0);
@@ -2302,8 +2315,10 @@ function handleShapeEnd(){
                 fill:getHighlightAreaFillColor(currentColor),
                 stroke:'transparent',
                 strokeWidth:0,
-                strokeUniform:true, opacity:0
+                strokeUniform:true, opacity:0,
+                objectCaching:false
             });
+            finishedHL.dirty=true;
             applyHighlightSelectability(finishedHL, activeTool==='select');
             break;
         }
@@ -2737,8 +2752,10 @@ async function renderPage(n,containerOverride=null){
                         fill:'',
                         opacity:0,
                         strokeLineCap:'round',
-                        strokeLineJoin:'round'
+                        strokeLineJoin:'round',
+                        objectCaching:false
                     });
+                    e.path.dirty=true;
                     applyHighlightSelectability(e.path, canSelect);
                 }
             }
