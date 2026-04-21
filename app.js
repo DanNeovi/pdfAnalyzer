@@ -1294,27 +1294,33 @@ function getCurrentShapeFill(colorOverride=null){
     return rgbaFromHex(colorOverride||currentColor,shapeFillOpacity/100);
 }
 
-// Highlight layer — semi-transparent overlay like a real marker.
-// The previous implementation stored highlights with opacity:0 and used an
-// offscreen compositing pass to re-draw them at reduced alpha. That made
-// selection, undo/redo, color updates, PDF export, and hit-testing all
-// fragile — the object the user saw was never the object Fabric held.
-// Now we store the real rgba color directly. Overlapping strokes darken a
-// little, same as physical highlighters. Everything else works naturally.
-const HIGHLIGHT_PEN_ALPHA=0.35;
-const HIGHLIGHT_AREA_FILL_ALPHA=0.3;
-const HIGHLIGHT_AREA_STROKE_ALPHA=0.55;
+// Highlight layer — flat overlay like a real marker.
+// Rendering strategy: each highlight object is kept at opacity:0 so Fabric's
+// own render pass draws nothing visual. An after:render hook then redraws
+// every highlight onto an offscreen canvas at OPAQUE color — so N
+// overlapping shapes fuse into a single opaque silhouette — and blits that
+// offscreen onto the main canvas once at HIGHLIGHT_LAYER_ALPHA. Net result:
+// N overlapping highlights of the same color render as one flat region at
+// 35% alpha, not stacked 35%+35%+35% (which darkens with overlap).
+//
+// The objects themselves are stored with real rgba colors on stroke/fill so
+// the serialized JSON still describes a sensible shape if something bypasses
+// the composite (e.g. third-party Fabric exporters). Selection borders and
+// corner handles use their own colors and are drawn by Fabric's control
+// pipeline, so they remain visible even though opacity is 0.
+const HIGHLIGHT_LAYER_ALPHA=0.35;
 
 function getHighlightBrushColor(colorOverride=null){
-    return rgbaFromHex(colorOverride||currentColor,HIGHLIGHT_PEN_ALPHA);
+    return rgbaFromHex(colorOverride||currentColor,HIGHLIGHT_LAYER_ALPHA);
 }
 
 function getHighlightAreaFillColor(colorOverride=null){
-    return rgbaFromHex(colorOverride||currentColor,HIGHLIGHT_AREA_FILL_ALPHA);
+    return rgbaFromHex(colorOverride||currentColor,HIGHLIGHT_LAYER_ALPHA);
 }
 
-function getHighlightAreaStrokeColor(colorOverride=null){
-    return rgbaFromHex(colorOverride||currentColor,HIGHLIGHT_AREA_STROKE_ALPHA);
+function getHighlightAreaStrokeColor(){
+    // Boxes and ellipses have no border — the flat rgba fill is the whole visual.
+    return 'transparent';
 }
 
 function getHighlightBrushWidth(){
@@ -1333,32 +1339,83 @@ function isHighlightLayerObject(obj){
     return isHighlightPenObject(obj)||isHighlightAreaObject(obj);
 }
 
-// Older saves stored highlights with opacity:0 and opaque stroke/fill (they
-// only became visible via the offscreen composite hook). After loadFromJSON
-// those objects would render as invisible if we didn't reset them. This
-// migrates any legacy highlight back to real rgba + opacity 1 so it shows.
+// Store real rgba on stroke/fill (so serialization round-trips) and set
+// opacity:0 so Fabric's main render pass skips the geometry — the after:render
+// hook redraws the flat composite.
 function normalizeHighlightVisual(obj){
     if(!isHighlightLayerObject(obj))return;
+    if(obj._hlTempShape)return; // temp shape during drag: leave opacity:1 for live feedback
     const base=obj._hlBaseColor||(typeof obj.stroke==='string'&&obj.stroke)||currentColor;
     obj._hlBaseColor=base;
-    obj.set({opacity:1, strokeUniform:true});
+    obj.set({opacity:0, strokeUniform:true});
     if(isHighlightPenObject(obj)){
         obj.set({stroke:getHighlightBrushColor(base), fill:''});
     }else{
         obj.set({
             fill:getHighlightAreaFillColor(base),
-            stroke:getHighlightAreaStrokeColor(base)
+            stroke:'transparent', strokeWidth:0
         });
     }
 }
 
+// Draw every highlight on `fc` onto an offscreen canvas at opaque color,
+// then blit that onto `destCtx` at HIGHLIGHT_LAYER_ALPHA. Because the
+// offscreen uses opaque paint, overlapping highlights of the same color
+// merge into one flat silhouette before the alpha is applied. Used for both
+// live canvas rendering (after:render) and PDF export.
+function compositeHighlightLayer(fc,destCtx,{destWidth,destHeight,transform=null}={}){
+    if(!fc||!destCtx)return;
+    // Skip the temp shape: it renders itself live (rgba + opacity:1) during drag.
+    const hls=fc.getObjects().filter(o=>isHighlightLayerObject(o)&&!o._hlTempShape);
+    if(!hls.length)return;
+    const w=destWidth||destCtx.canvas.width;
+    const h=destHeight||destCtx.canvas.height;
+    const off=document.createElement('canvas');
+    off.width=w; off.height=h;
+    const oCtx=off.getContext('2d');
+    if(!oCtx)return;
+    if(transform){
+        oCtx.setTransform(transform[0],transform[1],transform[2],transform[3],transform[4],transform[5]);
+    }
+    hls.forEach(obj=>{
+        const savedOpacity=obj.opacity;
+        const savedStroke=obj.stroke;
+        const savedFill=obj.fill;
+        const savedStrokeWidth=obj.strokeWidth;
+        const base=obj._hlBaseColor||savedStroke||savedFill||currentColor;
+        obj.opacity=1;
+        if(isHighlightPenObject(obj)){
+            obj.stroke=base; obj.fill='';
+        }else{
+            obj.fill=base; obj.stroke='transparent'; obj.strokeWidth=0;
+        }
+        oCtx.save();
+        obj.render(oCtx);
+        oCtx.restore();
+        obj.opacity=savedOpacity;
+        obj.stroke=savedStroke;
+        obj.fill=savedFill;
+        obj.strokeWidth=savedStrokeWidth;
+    });
+    destCtx.save();
+    destCtx.setTransform(1,0,0,1,0,0);
+    destCtx.globalAlpha=HIGHLIGHT_LAYER_ALPHA;
+    destCtx.globalCompositeOperation='source-over';
+    destCtx.drawImage(off,0,0);
+    destCtx.restore();
+}
+
 // Toggle selectability to match the active tool. Highlights are only
-// movable/resizable when the Select tool is active.
+// movable/resizable when the Select tool is active. perPixelTargetFind is
+// forced off per-object because highlights render at opacity:0 (the flat
+// composite handles their actual visuals), and pixel-based hit testing
+// would read zero alpha there and fail to detect clicks.
 function applyHighlightSelectability(obj,selectMode){
     if(!isHighlightLayerObject(obj))return;
     obj.set({
         selectable:selectMode, evented:selectMode,
         hasControls:selectMode, hasBorders:selectMode,
+        perPixelTargetFind:false,
         borderColor:'rgba(102,153,255,0.75)',
         cornerColor:'rgba(102,153,255,0.75)',
         cornerStyle:'circle', transparentCorners:false
@@ -2111,21 +2168,29 @@ function handleShapeStart(c,o){
             c.add(tempShape);
             break;
         case 'highlightBox':
+            // Temp shape is visible (opacity:1 + rgba fill) during drag for feedback.
+            // finalizeShape flips to opacity:0 so the after:render composite takes over.
+            // _hlTempShape flag stops normalizeHighlightVisual from zeroing the opacity
+            // while the drag is still live.
             tempShape=new fabric.Rect({
                 left:p.x,top:p.y,width:0,height:0,
-                stroke:getHighlightAreaStrokeColor(),strokeWidth:Math.max(1,currentStrokeWidth),
+                stroke:'transparent',strokeWidth:0,
                 fill:getHighlightAreaFillColor(),
-                selectable:false,evented:false,annotationType:'highlightBox',strokeUniform:true
+                selectable:false,evented:false,annotationType:'highlightBox',strokeUniform:true,
+                opacity:1
             });
+            tempShape._hlTempShape=true;
             c.add(tempShape);
             break;
         case 'highlightEllipse':
             tempShape=new fabric.Ellipse({
                 left:p.x,top:p.y,rx:0,ry:0,
-                stroke:getHighlightAreaStrokeColor(),strokeWidth:Math.max(1,currentStrokeWidth),
+                stroke:'transparent',strokeWidth:0,
                 fill:getHighlightAreaFillColor(),
-                selectable:false,evented:false,annotationType:'highlightEllipse',strokeUniform:true
+                selectable:false,evented:false,annotationType:'highlightEllipse',strokeUniform:true,
+                opacity:1
             });
+            tempShape._hlTempShape=true;
             c.add(tempShape);
             break;
     }
@@ -2232,12 +2297,13 @@ function handleShapeEnd(){
         case 'highlightEllipse':{
             const finishedHL=tempShape;
             tempShape=null;
+            delete finishedHL._hlTempShape;
             finishedHL._hlBaseColor=currentColor;
             finishedHL.set({
                 fill:getHighlightAreaFillColor(currentColor),
-                stroke:getHighlightAreaStrokeColor(currentColor),
-                strokeWidth:Math.max(1,currentStrokeWidth),
-                strokeUniform:true, opacity:1
+                stroke:'transparent',
+                strokeWidth:0,
+                strokeUniform:true, opacity:0
             });
             applyHighlightSelectability(finishedHL, activeTool==='select');
             break;
@@ -2634,6 +2700,17 @@ async function renderPage(n,containerOverride=null){
             syncSizeControl();
         });
 
+        // Flat highlight compositing — see compositeHighlightLayer.
+        // Fabric's own pass draws highlights at opacity:0 (nothing visible);
+        // this hook paints the merged flat region once per frame.
+        fc.on('after:render',()=>{
+            compositeHighlightLayer(fc, fc.contextContainer, {
+                destWidth:fc.lowerCanvasEl.width,
+                destHeight:fc.lowerCanvasEl.height,
+                transform:fc.viewportTransform
+            });
+        });
+
         fc.on('object:added',e=>{
             const obj=e&&e.target;
             if(!obj)return;
@@ -2659,7 +2736,7 @@ async function renderPage(n,containerOverride=null){
                         annotationType:'highlightPen',
                         stroke:getHighlightBrushColor(currentColor),
                         fill:'',
-                        opacity:1,
+                        opacity:0,
                         strokeLineCap:'round',
                         strokeLineJoin:'round'
                     });
@@ -2667,6 +2744,7 @@ async function renderPage(n,containerOverride=null){
                 }
             }
             saveCanvasState(fc);
+            fc.requestRenderAll();
         });
 
         fc.on('text:editing:entered',()=>{
@@ -2909,8 +2987,9 @@ function shouldRasterizeTextForPdf(obj){
 function getExportSourceCanvas(fc,multiplier=1,includeText=true){
     // Prefer fabric's export path so vectors/text are rerendered at higher resolution.
     // NOTE: caller must reset viewport transform to identity before calling this.
-    // Highlights now carry their real rgba color, so fabric's export renders them
-    // the same way the screen does — no separate compositing pass needed.
+    // Highlights are stored with opacity:0 — Fabric's native export draws nothing
+    // for them. We layer them in via compositeHighlightLayer so the exported PDF
+    // has the same flat-marker look as the screen.
     const hiddenText=[];
     if(fc&&!includeText){
         fc.getObjects().forEach(o=>{
@@ -2935,7 +3014,21 @@ function getExportSourceCanvas(fc,multiplier=1,includeText=true){
         }
     }
     if(!baseCanvas)baseCanvas=fc?fc.lowerCanvasEl:null;
-    return baseCanvas||null;
+    if(!baseCanvas)return null;
+    // Paint the flat highlight layer on top of the exported base canvas.
+    const hasHighlights=fc&&fc.getObjects().some(o=>isHighlightLayerObject(o)&&!o._hlTempShape);
+    if(hasHighlights){
+        const ctx=baseCanvas.getContext('2d');
+        if(ctx){
+            compositeHighlightLayer(fc, ctx, {
+                destWidth:baseCanvas.width,
+                destHeight:baseCanvas.height,
+                // toCanvasElement scales by multiplier internally; mirror that here
+                transform:[multiplier,0,0,multiplier,0,0]
+            });
+        }
+    }
+    return baseCanvas;
 }
 
 function buildNormalizedOverlayCanvas(fc,rotation,multiplier=SAVE_OVERLAY_SCALE,includeText=true){
