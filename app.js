@@ -1085,9 +1085,14 @@ function undo(){
     canvas.loadFromJSON(entry.state,()=>{
         canvas._restoring=false;
         refreshCanvasTextRendering(canvas);
+        const selectMode=activeTool==='select';
         canvas.forEachObject(o=>{
-            if(isHighlightLayerObject(o))applyHighlightLayerStyling(o);
-            else{o.selectable=activeTool==='select';o.evented=activeTool==='select';}
+            if(isHighlightLayerObject(o)){
+                normalizeHighlightVisual(o);
+                applyHighlightSelectability(o,selectMode);
+            }else{
+                o.selectable=selectMode;o.evented=selectMode;
+            }
         });
         canvas.renderAll();
         canvas._lastSavedState=entry.state;
@@ -1114,9 +1119,14 @@ function redo(){
     canvas.loadFromJSON(entry.state,()=>{
         canvas._restoring=false;
         refreshCanvasTextRendering(canvas);
+        const selectMode=activeTool==='select';
         canvas.forEachObject(o=>{
-            if(isHighlightLayerObject(o))applyHighlightLayerStyling(o);
-            else{o.selectable=activeTool==='select';o.evented=activeTool==='select';}
+            if(isHighlightLayerObject(o)){
+                normalizeHighlightVisual(o);
+                applyHighlightSelectability(o,selectMode);
+            }else{
+                o.selectable=selectMode;o.evented=selectMode;
+            }
         });
         canvas.renderAll();
         canvas._lastSavedState=entry.state;
@@ -1197,8 +1207,12 @@ function configureTextObjectRendering(obj){
 
 function refreshCanvasTextRendering(canvas){
     if(!canvas)return;
+    const selectMode=activeTool==='select';
     canvas.getObjects().forEach(obj=>{
-        applyHighlightLayerStyling(obj);
+        if(isHighlightLayerObject(obj)){
+            normalizeHighlightVisual(obj);
+            applyHighlightSelectability(obj,selectMode);
+        }
         if(isTextObject(obj))configureTextObjectRendering(obj);
     });
 }
@@ -1280,26 +1294,27 @@ function getCurrentShapeFill(colorOverride=null){
     return rgbaFromHex(colorOverride||currentColor,shapeFillOpacity/100);
 }
 
-const HIGHLIGHT_LAYER_OPACITY=0.35;
+// Highlight layer — semi-transparent overlay like a real marker.
+// The previous implementation stored highlights with opacity:0 and used an
+// offscreen compositing pass to re-draw them at reduced alpha. That made
+// selection, undo/redo, color updates, PDF export, and hit-testing all
+// fragile — the object the user saw was never the object Fabric held.
+// Now we store the real rgba color directly. Overlapping strokes darken a
+// little, same as physical highlighters. Everything else works naturally.
+const HIGHLIGHT_PEN_ALPHA=0.35;
+const HIGHLIGHT_AREA_FILL_ALPHA=0.3;
+const HIGHLIGHT_AREA_STROKE_ALPHA=0.55;
 
 function getHighlightBrushColor(colorOverride=null){
-    // Semi-transparent for live brush preview during drawing
-    return rgbaFromHex(colorOverride||currentColor,HIGHLIGHT_LAYER_OPACITY);
+    return rgbaFromHex(colorOverride||currentColor,HIGHLIGHT_PEN_ALPHA);
 }
 
-function getHighlightOpaqueColor(colorOverride=null){
-    // Opaque color used for stored highlight objects (composited via offscreen canvas)
-    return colorOverride||currentColor;
+function getHighlightAreaFillColor(colorOverride=null){
+    return rgbaFromHex(colorOverride||currentColor,HIGHLIGHT_AREA_FILL_ALPHA);
 }
 
-function getHighlightAreaFillColor(colorOverride=null,opaque=false){
-    if(opaque)return colorOverride||currentColor;
-    return rgbaFromHex(colorOverride||currentColor,0.24);
-}
-
-function getHighlightAreaStrokeColor(colorOverride=null,opaque=false){
-    if(opaque)return colorOverride||currentColor;
-    return rgbaFromHex(colorOverride||currentColor,0.6);
+function getHighlightAreaStrokeColor(colorOverride=null){
+    return rgbaFromHex(colorOverride||currentColor,HIGHLIGHT_AREA_STROKE_ALPHA);
 }
 
 function getHighlightBrushWidth(){
@@ -1318,33 +1333,46 @@ function isHighlightLayerObject(obj){
     return isHighlightPenObject(obj)||isHighlightAreaObject(obj);
 }
 
-function applyHighlightLayerStyling(obj){
+// Older saves stored highlights with opacity:0 and opaque stroke/fill (they
+// only became visible via the offscreen composite hook). After loadFromJSON
+// those objects would render as invisible if we didn't reset them. This
+// migrates any legacy highlight back to real rgba + opacity 1 so it shows.
+function normalizeHighlightVisual(obj){
     if(!isHighlightLayerObject(obj))return;
-    if(typeof tempShape!=='undefined'&&obj===tempShape)return;
-    const inSelectMode=activeTool==='select';
-    // Always use opaque colors — after:render composites at HIGHLIGHT_LAYER_OPACITY.
-    // Keep visible:true + opacity:0 so Fabric's hit-testing works in select mode,
-    // but the normal render draws nothing. The offscreen composite draws the real visual.
-    obj.set({
-        selectable:inSelectMode, evented:inSelectMode,
-        hasControls:inSelectMode, hasBorders:inSelectMode,
-        strokeUniform:true, visible:true, opacity:0,
-        perPixelTargetFind:false
-    });
+    const base=obj._hlBaseColor||(typeof obj.stroke==='string'&&obj.stroke)||currentColor;
+    obj._hlBaseColor=base;
+    obj.set({opacity:1, strokeUniform:true});
     if(isHighlightPenObject(obj)){
-        obj.set({stroke:getHighlightOpaqueColor(obj._hlBaseColor||obj.stroke)});
-    }
-    if(isHighlightAreaObject(obj)){
+        obj.set({stroke:getHighlightBrushColor(base), fill:''});
+    }else{
         obj.set({
-            fill:getHighlightAreaFillColor(obj._hlBaseColor||obj.stroke,true),
-            stroke:getHighlightAreaStrokeColor(obj._hlBaseColor||obj.stroke,true)
+            fill:getHighlightAreaFillColor(base),
+            stroke:getHighlightAreaStrokeColor(base)
         });
     }
 }
 
-function normalizeHighlightLayer(canvas){
+// Toggle selectability to match the active tool. Highlights are only
+// movable/resizable when the Select tool is active.
+function applyHighlightSelectability(obj,selectMode){
+    if(!isHighlightLayerObject(obj))return;
+    obj.set({
+        selectable:selectMode, evented:selectMode,
+        hasControls:selectMode, hasBorders:selectMode,
+        borderColor:'rgba(102,153,255,0.75)',
+        cornerColor:'rgba(102,153,255,0.75)',
+        cornerStyle:'circle', transparentCorners:false
+    });
+}
+
+function refreshHighlightLayer(canvas){
     if(!canvas)return;
-    canvas.getObjects().forEach(applyHighlightLayerStyling);
+    const selectMode=activeTool==='select';
+    canvas.getObjects().forEach(o=>{
+        if(!isHighlightLayerObject(o))return;
+        normalizeHighlightVisual(o);
+        applyHighlightSelectability(o,selectMode);
+    });
 }
 
 function clearActiveSelectionsExcept(pageNum){
@@ -1425,10 +1453,10 @@ function enlivenClipboardObjects(serializedObjects){
 function prepareClipboardObject(obj){
     if(!obj)return;
     obj.set({selectable:true,evented:true});
-    if(isHighlightPenObject(obj)||isHighlightAreaObject(obj)){
-        obj.set({borderColor:'rgba(102,153,255,0.75)',cornerColor:'rgba(102,153,255,0.75)',cornerStyle:'circle',transparentCorners:false});
+    if(isHighlightLayerObject(obj)){
+        normalizeHighlightVisual(obj);
+        applyHighlightSelectability(obj,true);
     }
-    applyHighlightLayerStyling(obj);
     if(isTextObject(obj))configureTextObjectRendering(obj);
     if(isArrowGroup(obj)){
         obj.set({lockScalingX:true,lockScalingY:true});
@@ -1642,12 +1670,12 @@ function setObjectColor(obj,color){
     }
     if(isHighlightPenObject(obj)){
         obj._hlBaseColor=color;
-        obj.set({stroke:getHighlightOpaqueColor(color)});
+        obj.set({stroke:getHighlightBrushColor(color)});
         return;
     }
     if(isHighlightAreaObject(obj)){
         obj._hlBaseColor=color;
-        obj.set({stroke:getHighlightAreaStrokeColor(color,true),fill:getHighlightAreaFillColor(color,true)});
+        obj.set({stroke:getHighlightAreaStrokeColor(color),fill:getHighlightAreaFillColor(color)});
         return;
     }
     if(isArrowGroup(obj)){
@@ -1778,7 +1806,8 @@ function setActiveTool(t,{announce=true,persist=true}={}){
         c.defaultCursor=cursor;
         c.forEachObject(o=>{
             if(isHighlightLayerObject(o)){
-                applyHighlightLayerStyling(o);
+                normalizeHighlightVisual(o);
+                applyHighlightSelectability(o,isSelect);
             }else{
                 o.selectable=isSelect;o.evented=isSelect;
             }
@@ -2202,17 +2231,15 @@ function handleShapeEnd(){
         case 'highlightBox':
         case 'highlightEllipse':{
             const finishedHL=tempShape;
-            tempShape=null; // Clear ref so applyHighlightLayerStyling won't skip it
-            const hlBaseColor=currentColor;
-            finishedHL._hlBaseColor=hlBaseColor;
+            tempShape=null;
+            finishedHL._hlBaseColor=currentColor;
             finishedHL.set({
-                fill:getHighlightAreaFillColor(hlBaseColor,true),
-                stroke:getHighlightAreaStrokeColor(hlBaseColor,true)
+                fill:getHighlightAreaFillColor(currentColor),
+                stroke:getHighlightAreaStrokeColor(currentColor),
+                strokeWidth:Math.max(1,currentStrokeWidth),
+                strokeUniform:true, opacity:1
             });
-            // Apply the highlight layer compositing style (opacity:0 + offscreen render).
-            // Previously set visible:false which hid the object from BOTH normal and
-            // composite render passes — the box would vanish immediately after drawing.
-            applyHighlightLayerStyling(finishedHL);
+            applyHighlightSelectability(finishedHL, activeTool==='select');
             break;
         }
     }
@@ -2607,46 +2634,13 @@ async function renderPage(n,containerOverride=null){
             syncSizeControl();
         });
 
-        // Composite highlight layer: render all highlights onto offscreen canvas at full opacity,
-        // then draw that single layer onto main canvas at reduced opacity (no overlap stacking)
-        // In select mode, highlights render normally (visible+selectable) so skip compositing
-        fc.on('after:render',()=>{
-            const objs=fc.getObjects().filter(o=>isHighlightLayerObject(o)&&!o._isMirror);
-            if(!objs.length)return;
-            const ctx=fc.contextContainer;
-            const w=fc.lowerCanvasEl.width, h=fc.lowerCanvasEl.height;
-            let offscreen=fc._hlOffscreen;
-            if(!offscreen||offscreen.width!==w||offscreen.height!==h){
-                offscreen=document.createElement('canvas');
-                offscreen.width=w;offscreen.height=h;
-                fc._hlOffscreen=offscreen;
-            }
-            const oCtx=offscreen.getContext('2d');
-            oCtx.clearRect(0,0,w,h);
-            oCtx.save();
-            const vpt=fc.viewportTransform;
-            oCtx.transform(vpt[0],vpt[1],vpt[2],vpt[3],vpt[4],vpt[5]);
-            objs.forEach(o=>{
-                const savedOpacity=o.opacity;
-                oCtx.save();
-                o.opacity=1;
-                o.render(oCtx);
-                o.opacity=savedOpacity;
-                oCtx.restore();
-            });
-            oCtx.restore();
-            ctx.save();
-            ctx.globalAlpha=HIGHLIGHT_LAYER_OPACITY;
-            ctx.globalCompositeOperation='destination-over';
-            ctx.setTransform(1,0,0,1,0,0);
-            ctx.drawImage(offscreen,0,0);
-            ctx.restore();
-        });
-
         fc.on('object:added',e=>{
             const obj=e&&e.target;
             if(!obj)return;
-            applyHighlightLayerStyling(obj);
+            if(isHighlightLayerObject(obj)){
+                normalizeHighlightVisual(obj);
+                applyHighlightSelectability(obj, activeTool==='select');
+            }
             if(isTextObject(obj))configureTextObjectRendering(obj);
             if(!isArrowGroup(obj))return;
             obj.set({lockScalingX:true,lockScalingY:true});
@@ -2661,9 +2655,15 @@ async function renderPage(n,containerOverride=null){
                 e.path.set({selectable:canSelect,evented:canSelect,hasControls:true,hasBorders:true,strokeUniform:true,padding:8});
                 if(activeTool==='highlight'&&highlightMode==='pen'){
                     e.path._hlBaseColor=currentColor;
-                    e.path.set({opacity:1,stroke:getHighlightOpaqueColor(),annotationType:'highlightPen',
-                        borderColor:'rgba(102,153,255,0.75)',cornerColor:'rgba(102,153,255,0.75)',cornerStyle:'circle',transparentCorners:false});
-                    applyHighlightLayerStyling(e.path);
+                    e.path.set({
+                        annotationType:'highlightPen',
+                        stroke:getHighlightBrushColor(currentColor),
+                        fill:'',
+                        opacity:1,
+                        strokeLineCap:'round',
+                        strokeLineJoin:'round'
+                    });
+                    applyHighlightSelectability(e.path, canSelect);
                 }
             }
             saveCanvasState(fc);
@@ -2908,10 +2908,10 @@ function shouldRasterizeTextForPdf(obj){
 
 function getExportSourceCanvas(fc,multiplier=1,includeText=true){
     // Prefer fabric's export path so vectors/text are rerendered at higher resolution.
-    // NOTE: caller must reset viewport transform to identity before calling this
+    // NOTE: caller must reset viewport transform to identity before calling this.
+    // Highlights now carry their real rgba color, so fabric's export renders them
+    // the same way the screen does — no separate compositing pass needed.
     const hiddenText=[];
-    const hlObjs=fc?fc.getObjects().filter(o=>isHighlightLayerObject(o)):[];
-    // Highlights are visible:false for live rendering; keep them hidden for base export
     if(fc&&!includeText){
         fc.getObjects().forEach(o=>{
             if(isTextObject(o)&&o.visible!==false&&!shouldRasterizeTextForPdf(o)){
@@ -2935,33 +2935,7 @@ function getExportSourceCanvas(fc,multiplier=1,includeText=true){
         }
     }
     if(!baseCanvas)baseCanvas=fc?fc.lowerCanvasEl:null;
-    if(!baseCanvas)return null;
-    // If highlights exist, composite them as a single flat layer behind everything
-    if(hlObjs.length){
-        const w=baseCanvas.width,h=baseCanvas.height;
-        // Render all highlights at full opacity onto offscreen canvas
-        const hlOff=document.createElement('canvas');
-        hlOff.width=w;hlOff.height=h;
-        const hlCtx=hlOff.getContext('2d');
-        hlCtx.scale(multiplier,multiplier);
-        hlObjs.forEach(o=>{
-            hlCtx.save();
-            o.visible=true;
-            o.render(hlCtx);
-            o.visible=false;
-            hlCtx.restore();
-        });
-        // Final composite: highlight layer at reduced opacity, then base annotations on top
-        const out=document.createElement('canvas');
-        out.width=w;out.height=h;
-        const outCtx=out.getContext('2d');
-        outCtx.globalAlpha=HIGHLIGHT_LAYER_OPACITY;
-        outCtx.drawImage(hlOff,0,0);
-        outCtx.globalAlpha=1;
-        outCtx.drawImage(baseCanvas,0,0);
-        return out;
-    }
-    return baseCanvas;
+    return baseCanvas||null;
 }
 
 function buildNormalizedOverlayCanvas(fc,rotation,multiplier=SAVE_OVERLAY_SCALE,includeText=true){
@@ -4168,11 +4142,21 @@ async function hydrateDraftAnnotations(items){
         canvas.loadFromJSON(item.fabricJson,()=>{
             canvas._restoring=false;
             refreshCanvasTextRendering(canvas);
+            const selectMode=activeTool==='select';
+            canvas.forEachObject(o=>{
+                if(isHighlightLayerObject(o)){
+                    normalizeHighlightVisual(o);
+                    applyHighlightSelectability(o,selectMode);
+                }
+            });
             canvas.renderAll();
             canvas._lastSavedState=item.fabricJson;
             canvas._historySeeded=false;
             savedStateByPage.set(item.pageNumber,item.fabricJson);
             resolve();
+        },(o,obj)=>{
+            if(o.annotationType)obj.annotationType=o.annotationType;
+            if(o._hlBaseColor)obj._hlBaseColor=o._hlBaseColor;
         });
     }));
     await Promise.all(tasks);
@@ -4301,7 +4285,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     if(bd){
         // Show when this HTML file was last fetched/cached by the SW.
         // On first load it's "just now"; after that it reflects the cache age.
-        const built='2026-04-20';
+        const built='2026-04-21';
         bd.textContent='Built '+built;
     }
 }
