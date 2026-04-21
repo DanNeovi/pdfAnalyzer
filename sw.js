@@ -1,12 +1,14 @@
 // Self-destruct service worker.
-// This app used to register as a PWA. It no longer is — it's a plain web
-// page. Any browser that previously registered the old sw.js will fetch this
-// new one, install it, and on activation it clears every cache this site
-// owned and unregisters itself. After one reload the user is back on a plain
-// web page with no service worker in the way.
-self.addEventListener('install', event => {
-    self.skipWaiting();
-});
+// This app used to register as a PWA (the old SW was cache-first and ended
+// up serving a stale app.js that broke Load PDF). It is no longer a PWA.
+// This worker:
+//   1. Takes over immediately (skipWaiting + clients.claim) so it replaces
+//      the old cache-first worker on the SAME reload the user does.
+//   2. Deletes every cache this site owned.
+//   3. Forces every controlled tab to reload via network so the user ends
+//      up on the live HTML/JS, not the stale copy.
+//   4. Unregisters itself. After that, there is no SW — it's a plain page.
+self.addEventListener('install', () => { self.skipWaiting(); });
 
 self.addEventListener('activate', event => {
     event.waitUntil((async () => {
@@ -14,11 +16,16 @@ self.addEventListener('activate', event => {
             const keys = await caches.keys();
             await Promise.all(keys.map(k => caches.delete(k).catch(() => {})));
         } catch {}
+        try { await self.clients.claim(); } catch {}
         try {
-            await self.registration.unregister();
+            const clients = await self.clients.matchAll({ type: 'window' });
+            clients.forEach(c => { try { c.navigate(c.url); } catch {} });
         } catch {}
+        try { await self.registration.unregister(); } catch {}
     })());
 });
 
-// Passthrough fetch — never intercept, never serve cached content.
-self.addEventListener('fetch', () => {});
+// Network-only passthrough. Never serve cached content.
+self.addEventListener('fetch', event => {
+    event.respondWith(fetch(event.request).catch(() => new Response('', { status: 504 })));
+});
