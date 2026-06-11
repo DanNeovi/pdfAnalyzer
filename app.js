@@ -34,6 +34,7 @@ const fillOpacityNumber=document.getElementById('fillOpacityNumber');
 
 const arrowModeGroup=document.getElementById('arrowModeGroup');
 const arrowModeSelect=document.getElementById('arrowModeSelect');
+const arrowNoteSideSelect=document.getElementById('arrowNoteSideSelect');
 const highlightModeGroup=document.getElementById('highlightModeGroup');
 const highlightModeDivider=document.getElementById('highlightModeDivider');
 const highlightModeSelect=document.getElementById('highlightModeSelect');
@@ -75,8 +76,10 @@ let lastCanvasMousePos=null;
 
 const PAGE_SCALE_ADJUST=0.98;
 const ARROW_MODE_OPTIONS=['single','double','note'];
+const ARROW_NOTE_SIDE_OPTIONS=['head','tail'];
 const HIGHLIGHT_MODE_OPTIONS=['pen','box','ellipse'];
 const PREF_KEY_ARROW_MODE='draftannotator.arrow.mode';
+const PREF_KEY_ARROW_NOTE_SIDE='draftannotator.arrow.noteSide';
 const PREF_KEY_HIGHLIGHT_MODE='draftannotator.highlight.mode';
 const PREF_KEY_RECENT_COLORS='draftannotator.recentColors';
 const PREF_KEY_SHORTCUTS='draftannotator.shortcuts';
@@ -84,6 +87,7 @@ const PREF_KEY_EDITOR_SETTINGS='draftannotator.editorSettings';
 const PREF_KEY_TOOLBAR_STATE='draftannotator.toolbarState';
 let defaultPageSize={w:900,h:1200};
 let arrowMode='single';
+let arrowNoteSide='head';
 let highlightMode='pen';
 let zoomFactor=1.0; // 1.0 = fit-to-width (100%)
 let pendingResizeFocus=null;
@@ -998,10 +1002,24 @@ function loadArrowModePreference(){
         if(saved&&ARROW_MODE_OPTIONS.includes(saved))arrowMode=saved;
     }catch(e){}
     if(arrowModeSelect)arrowModeSelect.value=arrowMode;
+    try{
+        const savedSide=localStorage.getItem(PREF_KEY_ARROW_NOTE_SIDE);
+        if(savedSide&&ARROW_NOTE_SIDE_OPTIONS.includes(savedSide))arrowNoteSide=savedSide;
+    }catch(e){}
+    if(arrowNoteSideSelect)arrowNoteSideSelect.value=arrowNoteSide;
+    syncArrowNoteSideVisibility();
 }
 
 function persistArrowModePreference(){
     try{localStorage.setItem(PREF_KEY_ARROW_MODE,arrowMode);}catch(e){}
+}
+
+function persistArrowNoteSidePreference(){
+    try{localStorage.setItem(PREF_KEY_ARROW_NOTE_SIDE,arrowNoteSide);}catch(e){}
+}
+
+function syncArrowNoteSideVisibility(){
+    if(arrowNoteSideSelect)arrowNoteSideSelect.classList.toggle('hidden',arrowMode!=='note');
 }
 
 function loadHighlightModePreference(){
@@ -2270,9 +2288,13 @@ function handleShapeEnd(){
                 const labelOffset=Math.max(18,currentFontSize);
                 const cosA=Math.cos(builtArrow.angle);
                 const sinA=Math.sin(builtArrow.angle);
-                const pointsLeft=cosA<-0.1;
-                const labelX=x2+(cosA*labelOffset);
-                const labelY=y2+(sinA*labelOffset);
+                const atTail=arrowNoteSide==='tail';
+                // Offset away from the arrow: past the tip at the head end, behind the start at the tail end
+                const dirX=atTail?-cosA:cosA;
+                const dirY=atTail?-sinA:sinA;
+                const pointsLeft=dirX<-0.1;
+                const labelX=(atTail?x1:x2)+(dirX*labelOffset);
+                const labelY=(atTail?y1:y2)+(dirY*labelOffset);
                 const txt=new fabric.IText('',{
                     left:labelX,
                     top:labelY-(currentFontSize*0.6),
@@ -3696,7 +3718,18 @@ if(arrowModeSelect){
         if(ARROW_MODE_OPTIONS.includes(selected)){
             arrowMode=selected;
             persistArrowModePreference();
+            syncArrowNoteSideVisibility();
             showMsg(`Arrow mode: ${arrowModeSelect.options[arrowModeSelect.selectedIndex].text}`);
+        }
+    });
+}
+if(arrowNoteSideSelect){
+    arrowNoteSideSelect.addEventListener('change',()=>{
+        const selected=arrowNoteSideSelect.value;
+        if(ARROW_NOTE_SIDE_OPTIONS.includes(selected)){
+            arrowNoteSide=selected;
+            persistArrowNoteSidePreference();
+            showMsg(`Arrow text at ${arrowNoteSide==='tail'?'tail':'head'} end`);
         }
     });
 }
