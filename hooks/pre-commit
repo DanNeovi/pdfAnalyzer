@@ -1,0 +1,12 @@
+#!/bin/sh
+# Auto-stamps the "Built" line in app.js with the current date/time on every
+# commit, so the deployed page always shows when it was last updated.
+#
+# One-time setup per clone:  git config core.hooksPath hooks
+cd "$(git rev-parse --show-toplevel)" || exit 0
+built=$(date "+%Y-%m-%d %H:%M %Z")
+if grep -q "const built='" app.js; then
+    sed -i "s|const built='[^']*';|const built='$built';|" app.js
+    git add app.js
+fi
+exit 0

@@ -4425,8 +4425,8 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
 {
     const bd=document.getElementById('buildDate');
     if(bd){
-        // Manually bumped each commit. Format: YYYY-MM-DD HH:MM TZ.
-        const built='2026-04-21 10:47 PDT';
+        // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
+        const built='2026-06-10 18:10 PDT';
         bd.textContent='Built '+built;
     }
 }
