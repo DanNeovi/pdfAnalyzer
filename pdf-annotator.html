@@ -2,11 +2,13 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#4f46e5">
     <meta name="description" content="PDF annotation and redlining tool">
     <title>DraftAnnotator - PDF Redlining Tool</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Pre-built static Tailwind (see tailwind.config.js to regenerate). Replaces
+         the dev-only play CDN: same-origin, no runtime JIT, no third-party script. -->
+    <link rel="stylesheet" href="tailwind.css">
     <style>
         #fileInput { display: none; }
         .tool-btn {
@@ -99,9 +101,9 @@
             position: absolute !important; top: 0; left: 0;
         }
         /* Text layer: invisible spans positioned over each page so the
-           browser's native Ctrl+F can find and scroll to text. Stays below
-           the Fabric overlay so annotation tools still receive clicks, but
-           text remains selectable when no tool is active. */
+           browser's native Ctrl+F can find and scroll to text. Sits below the
+           Fabric overlay so annotation tools always receive clicks; the layer
+           is non-interactive and exists only for find-in-page. */
         .pdf-text-layer {
             position: absolute; top: 0; left: 0;
             overflow: hidden;
@@ -116,13 +118,8 @@
             white-space: pre;
             transform-origin: 0% 0%;
             cursor: text;
-            pointer-events: auto;
         }
         .pdf-text-layer ::selection { background: rgba(59,130,246,0.35); color: transparent; }
-        /* When the user is in pan/select-only mode (no annotation tool active)
-           we lift the text layer above the fabric canvas so they can highlight
-           and copy text. Toggled by JS via .text-select-mode. */
-        body.text-select-mode .pdf-text-layer { pointer-events: auto; z-index: 5; }
         .filename-display {
             max-width: 200px; overflow: hidden;
             text-overflow: ellipsis; white-space: nowrap;
@@ -943,7 +940,7 @@
                         <span class="text-xs font-mono text-gray-400" id="buildVersion">v20</span>
                         <span class="text-xs text-gray-400" id="buildDate"></span>
                     </div>
-                    <a href="https://github.com/DanNeovi/pdf-analyzer" target="_blank" rel="noopener noreferrer"
+                    <a href="https://github.com/DanNeovi/pdfAnalyzer" target="_blank" rel="noopener noreferrer"
                        class="inline-flex items-center gap-1.5 text-xs font-semibold text-gray-500 hover:text-indigo-600 transition-colors">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                             <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>

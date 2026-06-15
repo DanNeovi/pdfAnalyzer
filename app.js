@@ -1123,6 +1123,7 @@ function undo(){
     currentVisiblePage=entry.pageNum;
     activeContextPageNum=entry.pageNum;
     updatePageIndicator();
+    scrollPageIntoViewIfNeeded(entry.pageNum);
     showMsg("Undo");
 }
 
@@ -1157,11 +1158,19 @@ function redo(){
     currentVisiblePage=entry.pageNum;
     activeContextPageNum=entry.pageNum;
     updatePageIndicator();
+    scrollPageIntoViewIfNeeded(entry.pageNum);
     showMsg("Redo");
 }
 
 function clampNumber(v,min,max){
     return Math.max(min,Math.min(max,v));
+}
+
+// block:'nearest' is a no-op when the page is already fully visible, so this
+// only scrolls when an undo/redo lands on an off-screen page.
+function scrollPageIntoViewIfNeeded(pageNum){
+    const pageEl=document.querySelector(`[data-page-num="${pageNum}"]`);
+    if(pageEl)pageEl.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
 function hexToRgbChannels(hex){
@@ -2720,8 +2729,6 @@ async function renderPage(n,containerOverride=null){
             // Account for object origin (center vs left/top)
             const ox=obj.originX==='center'?oW/2:obj.originX==='right'?oW:0;
             const oy=obj.originY==='center'?oH/2:obj.originY==='bottom'?oH:0;
-            const minLeft=0-ox, minTop=0-oy;
-            const maxLeft=cW-oW+ox-ox, maxTop=cH-oH+oy-oy;
             // Clamp: left edge >= 0, right edge <= cW
             const effectiveLeft=obj.left-ox;
             const effectiveTop=obj.top-oy;
@@ -2886,6 +2893,11 @@ async function renderPage(n,containerOverride=null){
         }
         fc.defaultCursor=getCursorForTool(activeTool);
         fc.calcOffset();
+        const pendingDraftJson=pendingDraftPageAnnotations.get(n);
+        if(pendingDraftJson){
+            pendingDraftPageAnnotations.delete(n);
+            applyDraftAnnotationsToCanvas(fc,n,pendingDraftJson);
+        }
         renderedPages.add(n);
         cont.style.minHeight=`${dh}px`;
         cont.dataset.rendered='true';
@@ -2905,6 +2917,7 @@ async function renderAllPages(){
     if(pageRenderObserver)pageRenderObserver.disconnect();
     pageRenderObserver=null;renderedPages.clear();renderingPages.clear();fabricCanvases.clear();
     pageViewportCache.clear();
+    pendingDraftPageAnnotations.clear();
     savedStateByPage.clear();historyStack.length=0;historyPointer=-1;hasPendingTextEdits=false;hasUnsavedChanges=false;
     isPanning=false;panOffsetX=0;panOffsetY=0;pdfViewer.style.transform='translate(0,0)';
     currentVisiblePage=1;activeContextPageNum=1;baseScale=null;zoomFactor=1.0;updateZoomDisplay();
@@ -2960,8 +2973,10 @@ async function loadPDF(f){
         const ab=await f.arrayBuffer();
         originalPdfBytes=new Uint8Array(ab);
         // Pass a copy to pdf.js - it transfers the ArrayBuffer ownership,
-        // which would detach originalPdfBytes and break pdf-lib on save
-        pdfDoc=await pdfjsLib.getDocument({data:originalPdfBytes.slice()}).promise;
+        // which would detach originalPdfBytes and break pdf-lib on save.
+        // isEvalSupported:false blocks the CVE-2024-4367 eval path (malicious
+        // font matrices executing JS) on pdf.js builds older than 4.2.67.
+        pdfDoc=await pdfjsLib.getDocument({data:originalPdfBytes.slice(),isEvalSupported:false}).promise;
         numPages=pdfDoc.numPages;
         await renderAllPages();
         btnSavePdf.disabled=false;recomputeUnsavedChanges();
@@ -3528,7 +3543,10 @@ function handleShortcutSettingsKeydown(e){
         saveShortcutSettings();
         return true;
     }
-    if(e.key!=='Tab')e.preventDefault();
+    // Swallow app shortcuts while the modal is open, but let browser-level
+    // keys (focus traversal, refresh, devtools) through.
+    const isBrowserKey=e.key==='Tab'||e.key==='F5'||e.key==='F12'||((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='r');
+    if(!isBrowserKey)e.preventDefault();
     return false;
 }
 
@@ -3572,14 +3590,16 @@ function executeShortcutAction(actionId,{isTyping=false,isEditingCanvas=false,ev
         case 'zoomIn': zoomIn(); return true;
         case 'zoomOut': zoomOut(); return true;
         case 'zoomFit': zoomFit(); return true;
-        case 'nudgeLeft': nudgeActiveSelection(-1,0); return true;
-        case 'nudgeRight': nudgeActiveSelection(1,0); return true;
-        case 'nudgeUp': nudgeActiveSelection(0,-1); return true;
-        case 'nudgeDown': nudgeActiveSelection(0,1); return true;
-        case 'nudgeLeftFast': nudgeActiveSelection(-10,0); return true;
-        case 'nudgeRightFast': nudgeActiveSelection(10,0); return true;
-        case 'nudgeUpFast': nudgeActiveSelection(0,-10); return true;
-        case 'nudgeDownFast': nudgeActiveSelection(0,10); return true;
+        // Nudges report whether anything was selected, so unhandled arrow
+        // keys fall through to native page scrolling.
+        case 'nudgeLeft': return nudgeActiveSelection(-1,0);
+        case 'nudgeRight': return nudgeActiveSelection(1,0);
+        case 'nudgeUp': return nudgeActiveSelection(0,-1);
+        case 'nudgeDown': return nudgeActiveSelection(0,1);
+        case 'nudgeLeftFast': return nudgeActiveSelection(-10,0);
+        case 'nudgeRightFast': return nudgeActiveSelection(10,0);
+        case 'nudgeUpFast': return nudgeActiveSelection(0,-10);
+        case 'nudgeDownFast': return nudgeActiveSelection(0,10);
         default: return false;
     }
 }
@@ -3608,8 +3628,8 @@ document.addEventListener('keydown',e=>{
     if(isTyping||isEditingCanvas)return;
 
     if(matchedAction){
-        e.preventDefault();
-        executeShortcutAction(matchedAction,{isTyping,isEditingCanvas,event:e});
+        const handled=executeShortcutAction(matchedAction,{isTyping,isEditingCanvas,event:e});
+        if(handled)e.preventDefault();
         return;
     }
 
@@ -4223,6 +4243,7 @@ const draftReviewConfig=(()=>{
 })();
 let draftReviewContext=null;
 const draftAutosaveTimers=new Map();
+const pendingDraftPageAnnotations=new Map();
 let draftReviewBootstrapping=false;
 
 function isDraftReviewMode(){
@@ -4275,31 +4296,42 @@ async function draftReviewFetch(path,init={}){
     return response;
 }
 
+function applyDraftAnnotationsToCanvas(canvas,pageNumber,fabricJson,onDone){
+    canvas._restoring=true;
+    canvas.loadFromJSON(fabricJson,()=>{
+        canvas._restoring=false;
+        refreshCanvasTextRendering(canvas);
+        const selectMode=activeTool==='select';
+        canvas.forEachObject(o=>{
+            if(isHighlightLayerObject(o)){
+                normalizeHighlightVisual(o);
+                applyHighlightSelectability(o,selectMode);
+            }
+        });
+        canvas.renderAll();
+        canvas._lastSavedState=fabricJson;
+        canvas._historySeeded=false;
+        savedStateByPage.set(pageNumber,fabricJson);
+        if(onDone)onDone();
+    },(o,obj)=>{
+        if(o.annotationType)obj.annotationType=o.annotationType;
+        if(o._hlBaseColor)obj._hlBaseColor=o._hlBaseColor;
+    });
+}
+
 async function hydrateDraftAnnotations(items){
     if(!Array.isArray(items)||!items.length)return;
     const tasks=items.filter(item=>item&&item.fabricJson).map(item=>new Promise(resolve=>{
         const canvas=fabricCanvases.get(item.pageNumber);
-        if(!canvas){resolve();return;}
-        canvas._restoring=true;
-        canvas.loadFromJSON(item.fabricJson,()=>{
-            canvas._restoring=false;
-            refreshCanvasTextRendering(canvas);
-            const selectMode=activeTool==='select';
-            canvas.forEachObject(o=>{
-                if(isHighlightLayerObject(o)){
-                    normalizeHighlightVisual(o);
-                    applyHighlightSelectability(o,selectMode);
-                }
-            });
-            canvas.renderAll();
-            canvas._lastSavedState=item.fabricJson;
-            canvas._historySeeded=false;
-            savedStateByPage.set(item.pageNumber,item.fabricJson);
+        if(!canvas){
+            // Page not rendered yet (pages render lazily on scroll). Stash the
+            // server copy so renderPage can apply it — dropping it here would
+            // let a later edit on that page autosave an empty canvas over it.
+            pendingDraftPageAnnotations.set(item.pageNumber,item.fabricJson);
             resolve();
-        },(o,obj)=>{
-            if(o.annotationType)obj.annotationType=o.annotationType;
-            if(o._hlBaseColor)obj._hlBaseColor=o._hlBaseColor;
-        });
+            return;
+        }
+        applyDraftAnnotationsToCanvas(canvas,item.pageNumber,item.fabricJson,resolve);
     }));
     await Promise.all(tasks);
     recomputeUnsavedChanges();
@@ -4394,7 +4426,7 @@ async function initializeDraftReviewMode(){
         const msg=document.getElementById('initialMessage');
         if(msg){
             msg.style.display='block';
-            msg.innerHTML=`<b style="color:#dc2626;">${message}</b><br><span class="text-base">Sign in to the workspace and reopen the review link.</span>`;
+            msg.innerHTML=`<b style="color:#dc2626;">${escapeHtml(message)}</b><br><span class="text-base">Sign in to the workspace and reopen the review link.</span>`;
         }
         setDraftSyncStatus('Draft unavailable','error');
         showMsg(message);
@@ -4426,7 +4458,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-06-10 18:10 PDT';
+        const built='2026-06-15 09:59 PDT';
         bd.textContent='Built '+built;
     }
 }

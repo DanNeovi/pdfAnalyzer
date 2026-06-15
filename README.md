@@ -1,6 +1,6 @@
 # pdf-analyzer
 
-Browser-based PDF markup tool for redlining drawings and documents. The app UI is branded as `DraftAnnotator`, but this repository is a simple static web app with no build step.
+Browser-based PDF markup tool for redlining drawings and documents. The app UI is branded as `DraftAnnotator`, but this repository is a simple static web app — just serve the files; no build step is needed to run it. (The committed `tailwind.css` only needs rebuilding if you change utility classes — see below.)
 
 ## What It Does
 
@@ -31,16 +31,23 @@ Opening the HTML file directly may work in some browsers, but a local server is 
 
 - `pdf-annotator.html`: main UI and static markup
 - `app.js`: application logic for PDF rendering, annotation tools, shortcuts, settings, and export
-- `manifest.json`: app metadata
+- `tailwind.css`: pre-built, committed Tailwind stylesheet served locally (no runtime CDN)
+- `tailwind.config.js` + `src/tailwind.input.css`: source for regenerating `tailwind.css`
 - `sw.js`: cleanup worker used to unregister older service-worker installs
+- `hooks/pre-commit`: stamps the build date/time into `app.js` on each commit (enable with `git config core.hooksPath hooks`)
 
 ## Dependencies
 
-The app loads these libraries from CDNs at runtime:
+`Tailwind CSS` is pre-built into `tailwind.css` and served from this repo, so styling needs no network access. These libraries still load from CDNs (with subresource-integrity hashes) at runtime, so the first load requires network access:
 
 - `pdf.js`
 - `fabric.js`
 - `pdf-lib`
-- `Tailwind CSS`
 
-Because of that, the first load requires network access.
+### Regenerating the stylesheet
+
+After adding or removing Tailwind utility classes in `pdf-annotator.html` or `app.js`, rebuild the stylesheet (requires Node):
+
+```powershell
+npx tailwindcss@3 -c tailwind.config.js -i src/tailwind.input.css -o tailwind.css --minify
+```
