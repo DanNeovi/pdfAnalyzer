@@ -34,7 +34,6 @@ const fillOpacityNumber=document.getElementById('fillOpacityNumber');
 
 const arrowModeGroup=document.getElementById('arrowModeGroup');
 const arrowModeSelect=document.getElementById('arrowModeSelect');
-const arrowNoteSideSelect=document.getElementById('arrowNoteSideSelect');
 const highlightModeGroup=document.getElementById('highlightModeGroup');
 const highlightModeDivider=document.getElementById('highlightModeDivider');
 const highlightModeSelect=document.getElementById('highlightModeSelect');
@@ -996,18 +995,32 @@ async function importSettingsFromFile(file){
     applyImportedSettingsPayload(payload);
 }
 
+// The single Arrow dropdown encodes both the style (single/double/note) and,
+// for note mode, which end the text sits on. Map between that combined value
+// and the underlying arrowMode + arrowNoteSide state (persisted separately so
+// older saved prefs still load).
+function getArrowSelectValue(){
+    if(arrowMode==='note')return arrowNoteSide==='tail'?'note-tail':'note-head';
+    return arrowMode;
+}
+
+function applyArrowSelectValue(value){
+    if(value==='note-head'){arrowMode='note';arrowNoteSide='head';return true;}
+    if(value==='note-tail'){arrowMode='note';arrowNoteSide='tail';return true;}
+    if(value==='single'||value==='double'){arrowMode=value;return true;}
+    return false;
+}
+
 function loadArrowModePreference(){
     try{
         const saved=localStorage.getItem(PREF_KEY_ARROW_MODE);
         if(saved&&ARROW_MODE_OPTIONS.includes(saved))arrowMode=saved;
     }catch(e){}
-    if(arrowModeSelect)arrowModeSelect.value=arrowMode;
     try{
         const savedSide=localStorage.getItem(PREF_KEY_ARROW_NOTE_SIDE);
         if(savedSide&&ARROW_NOTE_SIDE_OPTIONS.includes(savedSide))arrowNoteSide=savedSide;
     }catch(e){}
-    if(arrowNoteSideSelect)arrowNoteSideSelect.value=arrowNoteSide;
-    syncArrowNoteSideVisibility();
+    if(arrowModeSelect)arrowModeSelect.value=getArrowSelectValue();
 }
 
 function persistArrowModePreference(){
@@ -1016,10 +1029,6 @@ function persistArrowModePreference(){
 
 function persistArrowNoteSidePreference(){
     try{localStorage.setItem(PREF_KEY_ARROW_NOTE_SIDE,arrowNoteSide);}catch(e){}
-}
-
-function syncArrowNoteSideVisibility(){
-    if(arrowNoteSideSelect)arrowNoteSideSelect.classList.toggle('hidden',arrowMode!=='note');
 }
 
 function loadHighlightModePreference(){
@@ -3734,22 +3743,10 @@ if(pageJumpInput){
 }
 if(arrowModeSelect){
     arrowModeSelect.addEventListener('change',()=>{
-        const selected=arrowModeSelect.value;
-        if(ARROW_MODE_OPTIONS.includes(selected)){
-            arrowMode=selected;
+        if(applyArrowSelectValue(arrowModeSelect.value)){
             persistArrowModePreference();
-            syncArrowNoteSideVisibility();
-            showMsg(`Arrow mode: ${arrowModeSelect.options[arrowModeSelect.selectedIndex].text}`);
-        }
-    });
-}
-if(arrowNoteSideSelect){
-    arrowNoteSideSelect.addEventListener('change',()=>{
-        const selected=arrowNoteSideSelect.value;
-        if(ARROW_NOTE_SIDE_OPTIONS.includes(selected)){
-            arrowNoteSide=selected;
             persistArrowNoteSidePreference();
-            showMsg(`Arrow text at ${arrowNoteSide==='tail'?'tail':'head'} end`);
+            showMsg(`Arrow: ${arrowModeSelect.options[arrowModeSelect.selectedIndex].text}`);
         }
     });
 }
@@ -4458,7 +4455,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-06-15 09:59 PDT';
+        const built='2026-06-15 11:02 PDT';
         bd.textContent='Built '+built;
     }
 }
