@@ -6,6 +6,7 @@ Browser-based PDF markup tool for redlining drawings and documents. The app UI i
 
 - Load a PDF in the browser
 - Add annotations with select, pencil, line, arrow, rectangle, circle, cloud, text, and highlight tools
+- Automatically find 16, 14, and 12 gauge special stud/track cut-list rows (excluding flat straps), summarize quantities/weights, and export separated/combined CSV sections
 - Undo, redo, zoom, and navigate pages
 - Save the annotated result back out as a PDF
 - Customize keyboard shortcuts and editor limits in Settings
@@ -31,6 +32,7 @@ Opening the HTML file directly may work in some browsers, but a local server is 
 
 - `pdf-annotator.html`: main UI and static markup
 - `app.js`: application logic for PDF rendering, annotation tools, shortcuts, settings, and export
+- `material-analyzer.js`: PDF text-row parsing and summaries for special studs
 - `tailwind.css`: pre-built, committed Tailwind stylesheet served locally (no runtime CDN)
 - `tailwind.config.js` + `src/tailwind.input.css`: source for regenerating `tailwind.css`
 - `sw.js`: cleanup worker used to unregister older service-worker installs
@@ -50,4 +52,10 @@ After adding or removing Tailwind utility classes in `pdf-annotator.html` or `ap
 
 ```powershell
 npx tailwindcss@3 -c tailwind.config.js -i src/tailwind.input.css -o tailwind.css --minify
+```
+
+### Running the special-stud parser tests
+
+```powershell
+node tests\material-analyzer.test.js
 ```

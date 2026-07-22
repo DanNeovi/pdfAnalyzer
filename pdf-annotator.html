@@ -150,6 +150,65 @@
         #pageIndicator { transition: opacity 0.2s ease; }
         .divider { width: 1px; height: 24px; background: #d1d5db; margin: 0 4px; flex-shrink: 0; }
 
+        .special-stud-panel {
+            border: 1px solid #bfdbfe;
+            border-radius: 10px;
+            background: linear-gradient(180deg, #eff6ff 0%, #ffffff 100%);
+            padding: 12px;
+            margin-bottom: 14px;
+        }
+        .special-stud-heading {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            color: #1e3a8a; font-size: 14px; font-weight: 800;
+        }
+        .special-stud-status {
+            margin-top: 7px; color: #475569; font-size: 11px; line-height: 1.4;
+        }
+        .special-stud-status.error { color: #b91c1c; }
+        .special-stud-metrics {
+            display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 5px; margin-top: 10px;
+        }
+        .special-stud-metric {
+            border: 1px solid #dbeafe; border-radius: 7px; background: #fff;
+            padding: 6px 4px; text-align: center;
+        }
+        .special-stud-metric strong {
+            display: block; color: #111827; font-size: 14px; line-height: 1.1;
+        }
+        .special-stud-metric span {
+            display: block; margin-top: 3px; color: #64748b; font-size: 9px;
+            font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+        }
+        .special-stud-gauges { margin-top: 8px; }
+        .special-stud-gauge {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            border-top: 1px solid #dbeafe; padding: 6px 0; color: #334155; font-size: 10px;
+        }
+        .special-stud-gauge:first-child { border-top: none; }
+        .special-stud-gauge strong { color: #1e3a8a; font-size: 11px; }
+        .special-stud-actions { display: flex; gap: 6px; margin-top: 8px; }
+        .special-stud-action {
+            width: 100%; border: 1px solid #93c5fd; border-radius: 7px; background: #fff;
+            color: #1d4ed8; cursor: pointer; font-size: 10px; font-weight: 800; padding: 6px 8px;
+        }
+        .special-stud-action:hover { background: #dbeafe; }
+        .special-stud-action:disabled { cursor: not-allowed; opacity: 0.45; }
+        .special-stud-details { margin-top: 8px; }
+        .special-stud-details summary { color: #1e3a8a; cursor: pointer; font-size: 10px; font-weight: 800; }
+        .special-stud-table-wrap {
+            max-height: 230px; margin-top: 6px; overflow: auto;
+            border: 1px solid #dbeafe; border-radius: 6px; background: #fff;
+        }
+        .special-stud-table {
+            width: 100%; border-collapse: collapse; color: #334155; font-size: 9px; white-space: nowrap;
+        }
+        .special-stud-table th, .special-stud-table td { padding: 4px 5px; text-align: left; }
+        .special-stud-table th {
+            position: sticky; top: 0; background: #dbeafe; color: #1e3a8a; font-weight: 800; z-index: 1;
+        }
+        .special-stud-table tbody tr + tr { border-top: 1px solid #eff6ff; }
+
 
         .rainbow-btn {
             width: 24px; height: 24px; border-radius: 6px; cursor: pointer; flex-shrink: 0;
@@ -816,6 +875,33 @@
 <!-- Left Sidebar -->
 <aside id="sidebar" class="w-64 bg-white shadow-xl border-r border-gray-200 overflow-y-auto fixed left-0 top-0 bottom-0 z-10 pt-[88px]">
     <div class="p-4">
+        <section id="specialStudPanel" class="special-stud-panel" aria-live="polite">
+            <div class="special-stud-heading">
+                <span>Special Stud/Track Analyzer</span>
+                <span aria-hidden="true">#</span>
+            </div>
+            <p id="specialStudStatus" class="special-stud-status">Load a PDF to scan for 16, 14, and 12 gauge stud and track rows.</p>
+            <div id="specialStudResults" hidden>
+                <div class="special-stud-metrics">
+                    <div class="special-stud-metric"><strong id="specialStudPieceCount">0</strong><span>Pieces</span></div>
+                    <div class="special-stud-metric"><strong id="specialStudTypeCount">0</strong><span>Types</span></div>
+                    <div class="special-stud-metric"><strong id="specialStudWeight">0.0</strong><span>Lb</span></div>
+                </div>
+                <div id="specialStudGaugeSummary" class="special-stud-gauges"></div>
+                <div class="special-stud-actions">
+                    <button id="btnExportSpecialStudCsv" class="special-stud-action" type="button" disabled>Export CSV</button>
+                </div>
+                <details class="special-stud-details">
+                    <summary>Source rows (<span id="specialStudRowCount">0</span>)</summary>
+                    <div class="special-stud-table-wrap">
+                        <table class="special-stud-table">
+                            <thead><tr><th>Gauge / Type</th><th>Panel</th><th>Qty</th><th>Cut</th></tr></thead>
+                            <tbody id="specialStudRows"></tbody>
+                        </table>
+                    </div>
+                </details>
+            </div>
+        </section>
         <h2 class="text-base font-bold text-gray-900 mb-3">Quick Reference</h2>
         <div class="space-y-3">
             <div class="bg-gray-50 p-3 rounded-lg">
@@ -970,6 +1056,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js" integrity="sha512-CeIsOAsgJnmevfCi2C7Zsyy6bQKi43utIjdA87Q0ZY84oDqnI0uwfM9+bKiIkI75lUeI00WG/+uJzOmuHlesMA==" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js" integrity="sha256-D5pcrQeUHwgmWGyU4InYm5GMRuXBfPLVo8b2ZuO8aU8=" crossorigin="anonymous"></script>
 
+<script src="material-analyzer.js"></script>
 <script src="app.js"></script>
 
 </body>

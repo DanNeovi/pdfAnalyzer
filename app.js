@@ -59,6 +59,15 @@ const settingsImportInput=document.getElementById('settingsImportInput');
 const shortcutToolRows=document.getElementById('shortcutToolRows');
 const shortcutActionRows=document.getElementById('shortcutActionRows');
 const shortcutSettingsStatus=document.getElementById('shortcutSettingsStatus');
+const specialStudStatus=document.getElementById('specialStudStatus');
+const specialStudResults=document.getElementById('specialStudResults');
+const specialStudPieceCount=document.getElementById('specialStudPieceCount');
+const specialStudTypeCount=document.getElementById('specialStudTypeCount');
+const specialStudWeight=document.getElementById('specialStudWeight');
+const specialStudGaugeSummary=document.getElementById('specialStudGaugeSummary');
+const specialStudRowCount=document.getElementById('specialStudRowCount');
+const specialStudRows=document.getElementById('specialStudRows');
+const btnExportSpecialStudCsv=document.getElementById('btnExportSpecialStudCsv');
 const fabricCanvases=new Map();
 
 const savedStateByPage=new Map();
@@ -100,6 +109,8 @@ let queuedZoomFactor=null;
 let zoomWorkerActive=false;
 let maxStrokeSize=DEFAULT_MAX_STROKE_SIZE;
 let maxTextSize=DEFAULT_MAX_TEXT_SIZE;
+let specialStudAnalysisRows=[];
+let specialStudAnalysisRun=0;
 
 const TOOL_NAMES={select:'Select',draw:'Pencil',line:'Line',arrow:'Arrow',rect:'Rectangle',circle:'Circle',text:'Text',highlight:'Highlight',cloud:'Rev Cloud'};
 const SHAPE_TOOLS=['line','arrow','rect','circle','cloud'];
@@ -2964,11 +2975,116 @@ async function renderAllPages(){
 }
 
 // ─── PDF LOAD / SAVE ────────────────────────────────
+function resetSpecialStudAnalysis(message='Scanning PDF text for special studs...'){
+    specialStudAnalysisRows=[];
+    if(specialStudStatus){
+        specialStudStatus.textContent=message;
+        specialStudStatus.classList.remove('error');
+    }
+    if(specialStudResults)specialStudResults.hidden=true;
+    if(btnExportSpecialStudCsv)btnExportSpecialStudCsv.disabled=true;
+}
+
+function appendSpecialStudCell(row,value){
+    const cell=document.createElement('td');
+    cell.textContent=value;
+    row.appendChild(cell);
+}
+
+function renderSpecialStudAnalysis(rows){
+    const analyzer=window.SpecialStudAnalyzer;
+    const summary=analyzer.summarizeRows(rows);
+    specialStudAnalysisRows=rows.slice();
+    specialStudStatus.classList.remove('error');
+    if(!summary.rowCount){
+        specialStudStatus.textContent='No 16, 14, or 12 gauge stud or track rows were found. Flat straps are excluded.';
+        specialStudResults.hidden=true;
+        btnExportSpecialStudCsv.disabled=true;
+        return;
+    }
+
+    specialStudStatus.textContent=`Found ${summary.rowCount} special stud/track cut-list rows. Flat straps are excluded.`;
+    specialStudPieceCount.textContent=summary.quantity.toLocaleString();
+    specialStudTypeCount.textContent=summary.typeCount.toLocaleString();
+    specialStudWeight.textContent=summary.weightLb.toFixed(1);
+    specialStudRowCount.textContent=summary.rowCount.toLocaleString();
+
+    specialStudGaugeSummary.replaceChildren();
+    summary.byGauge.forEach(item=>{
+        const gaugeRow=document.createElement('div');
+        gaugeRow.className='special-stud-gauge';
+        const label=document.createElement('strong');
+        label.textContent=`${item.gauge} GA / ${item.thicknessMil} mil`;
+        const values=document.createElement('span');
+        values.textContent=`${item.quantity} pcs | ${item.weightLb.toFixed(1)} lb`;
+        gaugeRow.append(label,values);
+        specialStudGaugeSummary.appendChild(gaugeRow);
+    });
+
+    specialStudRows.replaceChildren();
+    rows.forEach(item=>{
+        const tableRow=document.createElement('tr');
+        appendSpecialStudCell(tableRow,`${item.gauge} / ${item.type}`);
+        appendSpecialStudCell(tableRow,item.panel);
+        appendSpecialStudCell(tableRow,String(item.quantity));
+        appendSpecialStudCell(tableRow,item.cutLength);
+        specialStudRows.appendChild(tableRow);
+    });
+    specialStudResults.hidden=false;
+    btnExportSpecialStudCsv.disabled=false;
+}
+
+async function runSpecialStudAnalysis(documentToAnalyze){
+    const analyzer=window.SpecialStudAnalyzer;
+    if(!analyzer){
+        if(specialStudStatus){
+            specialStudStatus.textContent='Special stud analyzer failed to load.';
+            specialStudStatus.classList.add('error');
+        }
+        return;
+    }
+    const runId=++specialStudAnalysisRun;
+    resetSpecialStudAnalysis();
+    try{
+        const rows=await analyzer.analyzePdfDocument(documentToAnalyze,(page,total)=>{
+            if(runId!==specialStudAnalysisRun)return;
+            specialStudStatus.textContent=`Scanning page ${page} of ${total} for special studs...`;
+        });
+        if(runId!==specialStudAnalysisRun||pdfDoc!==documentToAnalyze)return;
+        renderSpecialStudAnalysis(rows);
+    }catch(error){
+        if(runId!==specialStudAnalysisRun)return;
+        console.error('Special stud analysis failed:',error);
+        specialStudStatus.textContent=`Special stud scan failed: ${error.message||error}`;
+        specialStudStatus.classList.add('error');
+        specialStudResults.hidden=true;
+    }
+}
+
+function exportSpecialStudCsv(){
+    if(!specialStudAnalysisRows.length||!window.SpecialStudAnalyzer)return;
+    const csv=window.SpecialStudAnalyzer.rowsToReportCsv(specialStudAnalysisRows);
+    const blob=new Blob([csv],{type:'text/csv;charset=utf-8'});
+    const sourceBase=(currentFileName||'special-studs').replace(/\.pdf$/i,'');
+    const link=document.createElement('a');
+    link.href=URL.createObjectURL(blob);
+    link.download=`${sourceBase}_special_studs.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(()=>URL.revokeObjectURL(link.href),0);
+    showMsg('Special stud CSV exported');
+}
+
+if(btnExportSpecialStudCsv)btnExportSpecialStudCsv.addEventListener('click',exportSpecialStudCsv);
+
 async function loadPDF(f){
     const ini=document.getElementById('initialMessage');
     if(ini)ini.style.display='none';
     if(loadingOverlay)loadingOverlay.classList.remove('hidden');
     btnSavePdf.disabled=true;
+    specialStudAnalysisRun+=1;
+    resetSpecialStudAnalysis();
     try{
         if(pdfDoc){
             cancelAllRenderTasks();
@@ -2990,6 +3106,7 @@ async function loadPDF(f){
         await renderAllPages();
         btnSavePdf.disabled=false;recomputeUnsavedChanges();
         showMsg(`PDF loaded: ${numPages} page(s)`);
+        runSpecialStudAnalysis(pdfDoc);
         // Build text layers for every page in the background so Ctrl+F can
         // find text on pages the user hasn't scrolled to yet. Non-blocking.
         buildAllTextLayersForSearch().catch(e=>console.debug('text layer build failed',e));
@@ -2998,6 +3115,8 @@ async function loadPDF(f){
         fabricCanvases.forEach(c=>{try{c.dispose();}catch(ex){}});
         fabricCanvases.clear();renderedPages.clear();renderingPages.clear();
         savedStateByPage.clear();historyStack.length=0;historyPointer=-1;
+        specialStudAnalysisRun+=1;
+        resetSpecialStudAnalysis('Special stud scan unavailable because the PDF did not load.');
         const errDiv=document.createElement('div');errDiv.className='text-red-600 p-8';errDiv.textContent='Error: '+e.message;pdfViewer.innerHTML='';pdfViewer.appendChild(errDiv);
         btnSavePdf.disabled=true;
     }finally{
@@ -4455,7 +4574,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-06-15 11:02 PDT';
+        const built='2026-07-21 17:09 PDT';
         bd.textContent='Built '+built;
     }
 }
