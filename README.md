@@ -9,8 +9,28 @@ Browser-based PDF markup tool for redlining drawings and documents. The app UI i
 - Automatically find 16, 14, and 12 gauge special stud/track cut-list rows (excluding flat straps), summarize quantities/weights, and export separated/combined CSV sections
 - Undo, redo, zoom, and navigate pages
 - Save the annotated result back out as a PDF
+- Export/import a compact compressed editable annotation layer (`.draftanno`)
+- Copy or move a page's annotations to another page with automatic size remapping
 - Customize keyboard shortcuts and editor limits in Settings
 - Persist shortcut and toolbar preferences in browser storage
+
+## Editable annotation layers
+
+Editable layer tools are disabled by default and create no extra file. Enable them
+for the current session only when markup needs to be transferred or preserved.
+`Export Layer` saves only the Fabric annotation objects and page geometry; it never
+duplicates the source PDF. Modern browsers gzip the JSON into a `.draftanno` file.
+Load the destination or revised PDF first, then use `Import Layer`. Pages are matched
+by page number and coordinates are scaled to the destination page dimensions.
+
+`Copy Page` and `Move Page` transfer every annotation on the active page to the
+chosen target page. Move removes the source objects only after the target copy has
+been created successfully.
+
+PDF export remains a flattened delivery format. To limit growth, ordinary text is
+written as vector PDF text, graphical overlays are rendered at 2x and cropped to
+their painted bounds, and PDF object streams are enabled. Keep the `.draftanno`
+sidecar when future editing or transfer to a revised PDF is required.
 
 ## Quick Start
 

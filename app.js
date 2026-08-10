@@ -68,6 +68,14 @@ const specialStudGaugeSummary=document.getElementById('specialStudGaugeSummary')
 const specialStudRowCount=document.getElementById('specialStudRowCount');
 const specialStudRows=document.getElementById('specialStudRows');
 const btnExportSpecialStudCsv=document.getElementById('btnExportSpecialStudCsv');
+const btnExportAnnotations=document.getElementById('btnExportAnnotations');
+const btnImportAnnotations=document.getElementById('btnImportAnnotations');
+const btnCopyPageAnnotations=document.getElementById('btnCopyPageAnnotations');
+const btnMovePageAnnotations=document.getElementById('btnMovePageAnnotations');
+const annotationTargetPage=document.getElementById('annotationTargetPage');
+const annotationImportInput=document.getElementById('annotationImportInput');
+const enableEditableLayers=document.getElementById('enableEditableLayers');
+const editableLayerControls=document.getElementById('editableLayerControls');
 const fabricCanvases=new Map();
 
 const savedStateByPage=new Map();
@@ -1110,6 +1118,142 @@ function saveCanvasState(c){
     pushHistoryEntry(c._pageNum,state);
     c._lastSavedState=state;
     recomputeUnsavedChanges();
+}
+
+// Portable annotation layers. The PDF is deliberately not included: the
+// compressed sidecar contains only editable Fabric objects and page geometry.
+const ANNOTATION_FORMAT='draftannotator.annotations';
+const ANNOTATION_FORMAT_VERSION=1;
+
+function annotationPageSize(canvas){
+    const vpt=canvas.viewportTransform||[1,0,0,1,0,0];
+    return {width:canvas.width/(vpt[0]||1),height:canvas.height/(vpt[3]||1)};
+}
+
+function createAnnotationPackage(){
+    const pages=[];
+    fabricCanvases.forEach((canvas,pageNumber)=>{
+        const size=annotationPageSize(canvas);
+        const json=canvas.toJSON(['annotationType','selectable','evented','_hlBaseColor']);
+        if(json.objects&&json.objects.length){
+            pages.push({pageNumber,width:size.width,height:size.height,fabric:json});
+        }
+    });
+    return {
+        format:ANNOTATION_FORMAT,
+        version:ANNOTATION_FORMAT_VERSION,
+        source:{fileName:currentFileName||'',pageCount:numPages},
+        pages
+    };
+}
+
+async function gzipBytes(bytes){
+    if(typeof CompressionStream!=='function')return null;
+    const stream=new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function gunzipBytes(bytes){
+    if(typeof DecompressionStream!=='function')throw new Error('This browser cannot open compressed annotation layers.');
+    const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function exportEditableAnnotations(){
+    if(!pdfDoc)return;
+    const payload=createAnnotationPackage();
+    const raw=new TextEncoder().encode(JSON.stringify(payload));
+    const compressed=await gzipBytes(raw);
+    const data=compressed||raw;
+    const base=(currentFileName||'document').replace(/\.pdf$/i,'');
+    const extension=compressed?'draftanno':'annotations.json';
+    const blob=new Blob([data],{type:compressed?'application/gzip':'application/json'});
+    const link=document.createElement('a');
+    link.href=URL.createObjectURL(blob);link.download=`${base}.${extension}`;link.click();
+    setTimeout(()=>URL.revokeObjectURL(link.href),60000);
+    showMsg(`Editable layer exported (${Math.max(1,Math.round(data.length/1024))} KB)`);
+}
+
+function ensureAnnotationPackage(value){
+    if(!value||value.format!==ANNOTATION_FORMAT||value.version!==ANNOTATION_FORMAT_VERSION||!Array.isArray(value.pages)){
+        throw new Error('Unsupported or invalid annotation layer file.');
+    }
+    return value;
+}
+
+async function ensureAnnotationPageRendered(pageNumber){
+    if(fabricCanvases.has(pageNumber))return fabricCanvases.get(pageNumber);
+    if(pageNumber<1||pageNumber>numPages)throw new Error(`Page ${pageNumber} is not in this PDF.`);
+    const container=document.querySelector(`[data-page-num="${pageNumber}"]`);
+    await renderPage(pageNumber,container);
+    const canvas=fabricCanvases.get(pageNumber);
+    if(!canvas)throw new Error(`Could not prepare page ${pageNumber}.`);
+    return canvas;
+}
+
+function enlivenFabricObjects(objects){
+    return new Promise((resolve,reject)=>{
+        try{fabric.util.enlivenObjects(objects||[],resolve);}catch(error){reject(error);}
+    });
+}
+
+async function addPortableObjects(targetCanvas,fabricJson,sourceWidth,sourceHeight){
+    const objects=await enlivenFabricObjects(fabricJson&&fabricJson.objects);
+    const target=annotationPageSize(targetCanvas);
+    const sx=sourceWidth?target.width/sourceWidth:1;
+    const sy=sourceHeight?target.height/sourceHeight:1;
+    targetCanvas._suppressHistory=true;
+    objects.forEach(object=>{
+        object.set({
+            left:(Number(object.left)||0)*sx,
+            top:(Number(object.top)||0)*sy,
+            scaleX:(Number(object.scaleX)||1)*sx,
+            scaleY:(Number(object.scaleY)||1)*sy
+        });
+        if(isHighlightLayerObject(object)){normalizeHighlightVisual(object);applyHighlightSelectability(object,activeTool==='select');}
+        if(isTextObject(object))configureTextObjectRendering(object);
+        targetCanvas.add(object);
+    });
+    targetCanvas._suppressHistory=false;
+    targetCanvas.requestRenderAll();
+    saveCanvasState(targetCanvas);
+    return objects.length;
+}
+
+async function importEditableAnnotations(file){
+    if(!pdfDoc)throw new Error('Load the destination PDF first.');
+    let bytes=new Uint8Array(await file.arrayBuffer());
+    const isGzip=(bytes[0]===0x1f&&bytes[1]===0x8b)||/\.(gz|draftanno)$/i.test(file.name);
+    if(isGzip)bytes=await gunzipBytes(bytes);
+    const payload=ensureAnnotationPackage(JSON.parse(new TextDecoder().decode(bytes)));
+    let imported=0,skipped=0;
+    for(const pageData of payload.pages){
+        const pageNumber=Number(pageData.pageNumber);
+        if(pageNumber<1||pageNumber>numPages){skipped++;continue;}
+        const canvas=await ensureAnnotationPageRendered(pageNumber);
+        imported+=await addPortableObjects(canvas,pageData.fabric,Number(pageData.width),Number(pageData.height));
+    }
+    showMsg(`Imported ${imported} annotation(s)${skipped?`; skipped ${skipped} unavailable page(s)`:''}`);
+}
+
+async function transferCurrentPageAnnotations(move=false){
+    if(!pdfDoc)return;
+    const sourcePage=activeContextPageNum||currentVisiblePage;
+    const targetPage=Math.trunc(Number(annotationTargetPage&&annotationTargetPage.value));
+    if(!Number.isFinite(targetPage)||targetPage<1||targetPage>numPages)throw new Error(`Choose a target page from 1 to ${numPages}.`);
+    if(targetPage===sourcePage)throw new Error('Choose a different target page.');
+    const source=await ensureAnnotationPageRendered(sourcePage);
+    const target=await ensureAnnotationPageRendered(targetPage);
+    const sourceSize=annotationPageSize(source);
+    const json=source.toJSON(['annotationType','selectable','evented','_hlBaseColor']);
+    const count=await addPortableObjects(target,json,sourceSize.width,sourceSize.height);
+    if(move&&count){
+        source._suppressHistory=true;
+        source.getObjects().slice().forEach(object=>source.remove(object));
+        source._suppressHistory=false;source.requestRenderAll();saveCanvasState(source);
+    }
+    goToPage(targetPage);
+    showMsg(`${move?'Moved':'Copied'} ${count} annotation(s) to page ${targetPage}`);
 }
 
 function undo(){
@@ -3077,6 +3221,21 @@ function exportSpecialStudCsv(){
 }
 
 if(btnExportSpecialStudCsv)btnExportSpecialStudCsv.addEventListener('click',exportSpecialStudCsv);
+if(btnExportAnnotations)btnExportAnnotations.addEventListener('click',()=>exportEditableAnnotations().catch(error=>showMsg(`Export failed: ${error.message}`)));
+if(btnImportAnnotations)btnImportAnnotations.addEventListener('click',()=>annotationImportInput&&annotationImportInput.click());
+if(annotationImportInput)annotationImportInput.addEventListener('change',async()=>{
+    const file=annotationImportInput.files&&annotationImportInput.files[0];
+    annotationImportInput.value='';
+    if(!file)return;
+    try{await importEditableAnnotations(file);}catch(error){console.error('Annotation import failed:',error);showMsg(`Import failed: ${error.message}`);}
+});
+if(btnCopyPageAnnotations)btnCopyPageAnnotations.addEventListener('click',()=>transferCurrentPageAnnotations(false).catch(error=>showMsg(error.message)));
+if(btnMovePageAnnotations)btnMovePageAnnotations.addEventListener('click',()=>transferCurrentPageAnnotations(true).catch(error=>showMsg(error.message)));
+if(enableEditableLayers)enableEditableLayers.addEventListener('change',()=>{
+    if(editableLayerControls)editableLayerControls.hidden=!enableEditableLayers.checked;
+    const available=!!pdfDoc&&enableEditableLayers.checked;
+    [btnExportAnnotations,btnImportAnnotations,btnCopyPageAnnotations,btnMovePageAnnotations].forEach(button=>{if(button)button.disabled=!available;});
+});
 
 async function loadPDF(f){
     const ini=document.getElementById('initialMessage');
@@ -3103,6 +3262,9 @@ async function loadPDF(f){
         // font matrices executing JS) on pdf.js builds older than 4.2.67.
         pdfDoc=await pdfjsLib.getDocument({data:originalPdfBytes.slice(),isEvalSupported:false}).promise;
         numPages=pdfDoc.numPages;
+        if(annotationTargetPage){annotationTargetPage.max=String(numPages);annotationTargetPage.value=String(Math.min(2,numPages));}
+        const editableToolsEnabled=!!(enableEditableLayers&&enableEditableLayers.checked);
+        [btnExportAnnotations,btnImportAnnotations,btnCopyPageAnnotations,btnMovePageAnnotations].forEach(button=>{if(button)button.disabled=!editableToolsEnabled;});
         await renderAllPages();
         btnSavePdf.disabled=false;recomputeUnsavedChanges();
         showMsg(`PDF loaded: ${numPages} page(s)`);
@@ -3131,7 +3293,9 @@ function normalizeRotationAngle(angle){
     return (rot===90||rot===180||rot===270)?rot:0;
 }
 
-const SAVE_OVERLAY_SCALE=2.5;
+// Two device-independent pixels per display pixel is a good print-quality/file-size
+// balance. The resulting bitmap is cropped to non-transparent bounds before embed.
+const SAVE_OVERLAY_SCALE=2;
 
 function canvasToPngBytes(canvas){
     const dataUrl=canvas.toDataURL('image/png');
@@ -3245,6 +3409,31 @@ function buildNormalizedOverlayCanvas(fc,rotation,multiplier=SAVE_OVERLAY_SCALE,
     }
     ctx.drawImage(src,0,0);
     return out;
+}
+
+function cropCanvasToPaintedBounds(canvas,padding=4){
+    if(!canvas||!canvas.width||!canvas.height)return null;
+    const ctx=canvas.getContext('2d',{willReadFrequently:true});
+    if(!ctx)return null;
+    const {width,height}=canvas;
+    const pixels=ctx.getImageData(0,0,width,height).data;
+    let minX=width,minY=height,maxX=-1,maxY=-1;
+    for(let y=0;y<height;y++){
+        const row=y*width*4;
+        for(let x=0;x<width;x++){
+            if(pixels[row+(x*4)+3]!==0){
+                if(x<minX)minX=x;if(x>maxX)maxX=x;
+                if(y<minY)minY=y;if(y>maxY)maxY=y;
+            }
+        }
+    }
+    if(maxX<minX||maxY<minY)return null;
+    minX=Math.max(0,minX-padding);minY=Math.max(0,minY-padding);
+    maxX=Math.min(width-1,maxX+padding);maxY=Math.min(height-1,maxY+padding);
+    const cropped=document.createElement('canvas');
+    cropped.width=maxX-minX+1;cropped.height=maxY-minY+1;
+    cropped.getContext('2d').drawImage(canvas,minX,minY,cropped.width,cropped.height,0,0,cropped.width,cropped.height);
+    return {canvas:cropped,x:minX,y:minY,sourceWidth:width,sourceHeight:height};
 }
 
 const _colorParseCtx=document.createElement('canvas').getContext('2d');
@@ -3435,15 +3624,18 @@ async function saveAllPagesAsPDF(){
             const boxH=view[3]-view[1];
             const rot=normalizeRotationAngle(jsPage.rotate);
             const overlayCanvas=buildNormalizedOverlayCanvas(fc,rot,SAVE_OVERLAY_SCALE,false);
-            if(overlayCanvas){
-                const pngBytes=canvasToPngBytes(overlayCanvas);
+            const croppedOverlay=cropCanvasToPaintedBounds(overlayCanvas);
+            if(croppedOverlay){
+                const pngBytes=canvasToPngBytes(croppedOverlay.canvas);
                 if(pngBytes.length){
                     const overlay=await baseDoc.embedPng(pngBytes);
+                    const drawX=boxX+(croppedOverlay.x/croppedOverlay.sourceWidth)*boxW;
+                    const drawY=boxY+(1-((croppedOverlay.y+croppedOverlay.canvas.height)/croppedOverlay.sourceHeight))*boxH;
                     page.drawImage(overlay,{
-                        x:boxX,
-                        y:boxY,
-                        width:boxW,
-                        height:boxH
+                        x:drawX,
+                        y:drawY,
+                        width:(croppedOverlay.canvas.width/croppedOverlay.sourceWidth)*boxW,
+                        height:(croppedOverlay.canvas.height/croppedOverlay.sourceHeight)*boxH
                     });
                 }
             }
@@ -3458,7 +3650,7 @@ async function saveAllPagesAsPDF(){
 
         updateSaveProgress(88,'Compiling final PDF...');
         await yieldToUI();
-        const pdfBytes=await baseDoc.save({useObjectStreams:false});
+        const pdfBytes=await baseDoc.save({useObjectStreams:true});
 
         const blob=new Blob([pdfBytes],{type:'application/pdf'});
         const sourceName=currentFileName||'annotated_document';
@@ -4574,7 +4766,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-07-21 17:09 PDT';
+        const built='2026-08-10 15:50 PDT';
         bd.textContent='Built '+built;
     }
 }

@@ -875,6 +875,29 @@
 <!-- Left Sidebar -->
 <aside id="sidebar" class="w-64 bg-white shadow-xl border-r border-gray-200 overflow-y-auto fixed left-0 top-0 bottom-0 z-10 pt-[88px]">
     <div class="p-4">
+        <section class="special-stud-panel" aria-label="Editable annotation layers">
+            <div class="special-stud-heading"><span>Annotation Layers</span><span aria-hidden="true">&#8644;</span></div>
+            <label class="special-stud-status" style="display:flex;gap:7px;align-items:flex-start;cursor:pointer;">
+                <input id="enableEditableLayers" type="checkbox" style="margin-top:2px;">
+                <span>Enable editable layer tools for this session</span>
+            </label>
+            <div id="editableLayerControls" hidden>
+                <p class="special-stud-status">Export a small optional layer file or move markup between pages.</p>
+                <div class="special-stud-actions" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+                    <button id="btnExportAnnotations" class="special-stud-action" type="button" disabled>Export Layer</button>
+                    <button id="btnImportAnnotations" class="special-stud-action" type="button" disabled>Import Layer</button>
+                </div>
+                <div style="display:flex;gap:6px;align-items:center;margin-top:8px;">
+                    <label for="annotationTargetPage" class="text-xs font-bold">Target page</label>
+                    <input id="annotationTargetPage" type="number" min="1" value="1" class="toolbar-input" style="width:58px;">
+                </div>
+                <div class="special-stud-actions" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+                    <button id="btnCopyPageAnnotations" class="special-stud-action" type="button" disabled>Copy Page</button>
+                    <button id="btnMovePageAnnotations" class="special-stud-action" type="button" disabled>Move Page</button>
+                </div>
+            </div>
+            <input id="annotationImportInput" type="file" accept=".json,.gz,.draftanno,application/json,application/gzip" class="hidden">
+        </section>
         <section id="specialStudPanel" class="special-stud-panel" aria-live="polite">
             <div class="special-stud-heading">
                 <span>Special Stud/Track Analyzer</span>
