@@ -35,6 +35,68 @@
         };
     }
 
+    function clamp(value,min,max){
+        return Math.min(max,Math.max(min,value));
+    }
+
+    function getContainedImagePlacement(imageWidth,imageHeight,canvasWidth,canvasHeight,desiredX,desiredY,maxFraction=0.8){
+        const iw=Math.max(1,Number(imageWidth)||1);
+        const ih=Math.max(1,Number(imageHeight)||1);
+        const cw=Math.max(1,Number(canvasWidth)||1);
+        const ch=Math.max(1,Number(canvasHeight)||1);
+        const fraction=clamp(Number(maxFraction)||0.8,0.05,1);
+        const scale=Math.min(1,(cw*fraction)/iw,(ch*fraction)/ih);
+        const width=iw*scale;
+        const height=ih*scale;
+        const requestedX=Number.isFinite(Number(desiredX))?Number(desiredX):cw/2;
+        const requestedY=Number.isFinite(Number(desiredY))?Number(desiredY):ch/2;
+        return {
+            scale,
+            width,
+            height,
+            x:width>=cw?cw/2:clamp(requestedX,width/2,cw-(width/2)),
+            y:height>=ch?ch/2:clamp(requestedY,height/2,ch-(height/2))
+        };
+    }
+
+    function getBoundsTranslationInsideContainer(bounds,containerWidth,containerHeight,padding=0){
+        const x=Number(bounds&&bounds.x)||0;
+        const y=Number(bounds&&bounds.y)||0;
+        const width=Math.max(0,Number(bounds&&bounds.width)||0);
+        const height=Math.max(0,Number(bounds&&bounds.height)||0);
+        const cw=Math.max(1,Number(containerWidth)||1);
+        const ch=Math.max(1,Number(containerHeight)||1);
+        const pad=clamp(Number(padding)||0,0,Math.min(cw,ch)/2);
+        const availableWidth=Math.max(0,cw-(pad*2));
+        const availableHeight=Math.max(0,ch-(pad*2));
+        const targetX=width>availableWidth?(cw-width)/2:clamp(x,pad,cw-pad-width);
+        const targetY=height>availableHeight?(ch-height)/2:clamp(y,pad,ch-pad-height);
+        return {dx:targetX-x,dy:targetY-y};
+    }
+
+    function getClipboardObjectPlacement(object,sourceWidth,sourceHeight,targetWidth,targetHeight,delta=0){
+        const transform=getContainTransform(sourceWidth,sourceHeight,targetWidth,targetHeight);
+        const offset=Number(delta)||0;
+        return {
+            left:transform.offsetX+((Number(object&&object.left)||0)*transform.scale)+offset,
+            top:transform.offsetY+((Number(object&&object.top)||0)*transform.scale)+offset,
+            scaleX:(Number(object&&object.scaleX)||1)*transform.scale,
+            scaleY:(Number(object&&object.scaleY)||1)*transform.scale
+        };
+    }
+
+    function getClipboardImageBlob(clipboardData){
+        if(!clipboardData)return null;
+        const items=Array.from(clipboardData.items||[]);
+        for(const item of items){
+            if(item.kind==='file'&&/^image\//i.test(item.type||'')){
+                const file=typeof item.getAsFile==='function'?item.getAsFile():null;
+                if(file)return file;
+            }
+        }
+        return Array.from(clipboardData.files||[]).find(file=>/^image\//i.test(file.type||''))||null;
+    }
+
     function normalizeRotation(angle){
         const rotation=((Math.round(Number(angle)||0)%360)+360)%360;
         return rotation===90||rotation===180||rotation===270?rotation:0;
@@ -49,5 +111,14 @@
         }
     }
 
-    return {getContainTransform,isWinAnsiCompatibleText,normalizeRotation,rotatePixelRect};
+    return {
+        getBoundsTranslationInsideContainer,
+        getClipboardImageBlob,
+        getClipboardObjectPlacement,
+        getContainedImagePlacement,
+        getContainTransform,
+        isWinAnsiCompatibleText,
+        normalizeRotation,
+        rotatePixelRect
+    };
 }));

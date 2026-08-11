@@ -87,6 +87,9 @@ const historyStack=[];
 let historyPointer=-1;
 const CLIPBOARD_OBJECT_PROPS=['annotationType','_hlBaseColor'];
 const KEYBOARD_PASTE_OFFSET=15;
+const INTERNAL_CLIPBOARD_MIME='application/x-draftannotator-objects';
+const INTERNAL_CLIPBOARD_MARKER='DraftAnnotator annotation objects';
+const MAX_INSERT_IMAGE_BYTES=20*1024*1024;
 const DEFAULT_MAX_STROKE_SIZE=50;
 const DEFAULT_MAX_TEXT_SIZE=300;
 let objectClipboard=null;
@@ -1809,11 +1812,30 @@ function serializeObjectsForClipboard(objects){
     return objects.map(obj=>obj.toObject(CLIPBOARD_OBJECT_PROPS));
 }
 
+function serializeSelectionContextForClipboard(selectionContext){
+    if(!selectionContext||!selectionContext.objects.length)return [];
+    const {canvas,activeObj,objects}=selectionContext;
+    if(!isFabricType(activeObj,'activeSelection'))return serializeObjectsForClipboard(objects);
+
+    // Fabric stores members of an ActiveSelection in group-relative coordinates.
+    // Dismantle the selection before serialization so pasted objects retain their
+    // real page coordinates, then restore the selection without recording history.
+    canvas.discardActiveObject();
+    try{
+        objects.forEach(object=>object.setCoords());
+        return serializeObjectsForClipboard(objects);
+    }finally{
+        activateCanvasObjects(canvas,objects);
+    }
+}
+
 function copySelectionToClipboard({silent=false,context=null}={}){
     const selectionContext=context||getActiveSelectionContext();
     if(!selectionContext||!selectionContext.objects.length)return false;
+    const sourceSize=annotationPageSize(selectionContext.canvas);
     objectClipboard={
-        objects:serializeObjectsForClipboard(selectionContext.objects)
+        objects:serializeSelectionContextForClipboard(selectionContext),
+        source:{pageNumber:selectionContext.pageNum,width:sourceSize.width,height:sourceSize.height}
     };
     clipboardPasteCount=0;
     if(!silent){
@@ -1841,6 +1863,31 @@ function prepareClipboardObject(obj){
         setArrowGroupAppearance(obj,getStrokeWidthForObject(obj),strokeColor);
     }
     obj.setCoords();
+}
+
+function keepObjectsInsideCanvas(canvas,objects,padding=8){
+    if(!canvas||!objects.length)return;
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    objects.forEach(object=>{
+        object.setCoords();
+        const bounds=object.getBoundingRect(true,true);
+        minX=Math.min(minX,bounds.left);
+        minY=Math.min(minY,bounds.top);
+        maxX=Math.max(maxX,bounds.left+bounds.width);
+        maxY=Math.max(maxY,bounds.top+bounds.height);
+    });
+    if(!Number.isFinite(minX))return;
+    const size=annotationPageSize(canvas);
+    const translation=window.EditorUtils.getBoundsTranslationInsideContainer(
+        {x:minX,y:minY,width:maxX-minX,height:maxY-minY},size.width,size.height,padding);
+    if(!translation.dx&&!translation.dy)return;
+    objects.forEach(object=>{
+        object.set({
+            left:(Number(object.left)||0)+translation.dx,
+            top:(Number(object.top)||0)+translation.dy
+        });
+        object.setCoords();
+    });
 }
 
 function removeSelectionFromCanvas(context){
@@ -1888,18 +1935,21 @@ async function pasteClipboardObjects(payload=objectClipboard,{targetCanvas=null,
     }
     const nextOffset=Number.isFinite(offsetMultiplier)?offsetMultiplier:(clipboardPasteCount+1);
     const delta=KEYBOARD_PASTE_OFFSET*nextOffset;
+    const targetSize=annotationPageSize(canvas);
+    const sourceWidth=Number(payload.source&&payload.source.width)||targetSize.width;
+    const sourceHeight=Number(payload.source&&payload.source.height)||targetSize.height;
 
-    // Paste at original position + small offset (same spot on any page)
+    // Paste at the equivalent page position plus a small visible offset. Uniform
+    // page scaling prevents distortion when copying between different page sizes.
     canvas._suppressHistory=true;
     canvas.discardActiveObject();
     objects.forEach(obj=>{
-        obj.set({
-            left:(Number(obj.left)||0)+delta,
-            top:(Number(obj.top)||0)+delta
-        });
+        obj.set(window.EditorUtils.getClipboardObjectPlacement(
+            obj,sourceWidth,sourceHeight,targetSize.width,targetSize.height,delta));
         prepareClipboardObject(obj);
         canvas.add(obj);
     });
+    keepObjectsInsideCanvas(canvas,objects);
     canvas._suppressHistory=false;
     activateCanvasObjects(canvas,objects);
     saveCanvasState(canvas);
@@ -1916,10 +1966,15 @@ async function pasteClipboardObjects(payload=objectClipboard,{targetCanvas=null,
 function duplicateActiveSelection(){
     const context=getActiveSelectionContext();
     if(!context||!context.objects.length)return false;
+    const sourceSize=annotationPageSize(context.canvas);
     const payload={
-        objects:serializeObjectsForClipboard(context.objects)
+        objects:serializeSelectionContextForClipboard(context),
+        source:{pageNumber:context.pageNum,width:sourceSize.width,height:sourceSize.height}
     };
-    void pasteClipboardObjects(payload,{targetCanvas:context.canvas});
+    void pasteClipboardObjects(payload,{targetCanvas:context.canvas}).catch(error=>{
+        console.error('Duplicate failed:',error);
+        showMsg('Duplicate failed');
+    });
     return true;
 }
 
@@ -4047,7 +4102,12 @@ function executeShortcutAction(actionId,{isTyping=false,isEditingCanvas=false,ev
         case 'copy': copySelectionToClipboard(); return true;
         case 'cut': cutSelectionToClipboard(); return true;
         case 'paste':
-            if(objectClipboard&&objectClipboard.objects&&objectClipboard.objects.length)void pasteClipboardObjects();
+            if(objectClipboard&&objectClipboard.objects&&objectClipboard.objects.length){
+                void pasteClipboardObjects().catch(error=>{
+                    console.error('Paste failed:',error);
+                    showMsg('Paste failed');
+                });
+            }
             else showMsg('Clipboard empty');
             return true;
         case 'selectAll': selectAllOnActivePage(); return true;
@@ -4086,6 +4146,76 @@ function executeShortcutAction(actionId,{isTyping=false,isEditingCanvas=false,ev
     }
 }
 
+function isClipboardTextTarget(target){
+    return !!target&&(target.tagName==='INPUT'||target.tagName==='TEXTAREA'||target.isContentEditable);
+}
+
+function isCanvasTextEditing(){
+    for(const canvas of fabricCanvases.values()){
+        const activeObject=canvas.getActiveObject();
+        if(activeObject&&isTextObject(activeObject)&&activeObject.isEditing)return true;
+    }
+    return false;
+}
+
+function isNativeClipboardShortcutEvent(event,actionId){
+    if(!(event.ctrlKey||event.metaKey)||event.altKey)return false;
+    const expectedCode={copy:'KeyC',cut:'KeyX',paste:'KeyV'}[actionId];
+    return !!expectedCode&&event.code===expectedCode;
+}
+
+function writeInternalClipboardMarker(clipboardData){
+    if(!clipboardData)return;
+    try{clipboardData.setData(INTERNAL_CLIPBOARD_MIME,'1');}catch(error){}
+    try{clipboardData.setData('text/plain',INTERNAL_CLIPBOARD_MARKER);}catch(error){}
+}
+
+function clipboardContainsInternalMarker(clipboardData){
+    if(!clipboardData)return false;
+    try{
+        return clipboardData.getData(INTERNAL_CLIPBOARD_MIME)==='1'||
+            clipboardData.getData('text/plain')===INTERNAL_CLIPBOARD_MARKER;
+    }catch(error){return false;}
+}
+
+function getClipboardImageBlob(clipboardData){
+    return window.EditorUtils.getClipboardImageBlob(clipboardData);
+}
+
+document.addEventListener('copy',event=>{
+    if(isClipboardTextTarget(event.target)||isCanvasTextEditing()||(window.getSelection&&window.getSelection().toString()))return;
+    if(!copySelectionToClipboard())return;
+    event.preventDefault();
+    writeInternalClipboardMarker(event.clipboardData);
+});
+
+document.addEventListener('cut',event=>{
+    if(isClipboardTextTarget(event.target)||isCanvasTextEditing()||(window.getSelection&&window.getSelection().toString()))return;
+    if(!cutSelectionToClipboard())return;
+    event.preventDefault();
+    writeInternalClipboardMarker(event.clipboardData);
+});
+
+document.addEventListener('paste',event=>{
+    if(isClipboardTextTarget(event.target)||isCanvasTextEditing())return;
+    const imageBlob=getClipboardImageBlob(event.clipboardData);
+    if(imageBlob){
+        event.preventDefault();
+        void insertImageBlob(imageBlob,{source:'clipboard'});
+        return;
+    }
+    if(!clipboardContainsInternalMarker(event.clipboardData))return;
+    event.preventDefault();
+    if(objectClipboard&&objectClipboard.objects&&objectClipboard.objects.length){
+        void pasteClipboardObjects().catch(error=>{
+            console.error('Paste failed:',error);
+            showMsg('Paste failed');
+        });
+    }else{
+        showMsg('Copied annotations are no longer available');
+    }
+});
+
 document.addEventListener('keydown',e=>{
     if(isShortcutSettingsOpen()){
         handleShortcutSettingsKeydown(e);
@@ -4110,6 +4240,9 @@ document.addEventListener('keydown',e=>{
     if(isTyping||isEditingCanvas)return;
 
     if(matchedAction){
+        // Let the browser emit native copy/cut/paste events. Those events expose
+        // Windows screenshot image data and let us mark internal object copies.
+        if(isNativeClipboardShortcutEvent(e,matchedAction))return;
         const handled=executeShortcutAction(matchedAction,{isTyping,isEditingCanvas,event:e});
         if(handled)e.preventDefault();
         return;
@@ -4432,21 +4565,36 @@ function closeColorPopover(){
         const file=e.target.files&&e.target.files[0];
         if(!file)return;
         imageFileInput.value='';
-        if(file.size>20*1024*1024){showMsg('Image is too large (20 MB maximum)');return;}
-        const reader=new FileReader();
-        reader.onload=async(evt)=>{
-            try{
-                const optimized=await optimizeInsertedImage(evt.target.result,file.type);
-                insertImageOnCanvas(optimized);
-            }catch(error){
-                console.error('Image optimization failed:',error);
-                showMsg('Failed to prepare image');
-            }
-        };
-        reader.onerror=()=>showMsg('Failed to read image');
-        reader.readAsDataURL(file);
+        await insertImageBlob(file,{source:'file'});
     });
 })();
+
+function readBlobAsDataUrl(blob){
+    return new Promise((resolve,reject)=>{
+        const reader=new FileReader();
+        reader.onload=()=>resolve(reader.result);
+        reader.onerror=()=>reject(reader.error||new Error('Failed to read image'));
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function insertImageBlob(blob,{source='file'}={}){
+    if(!blob||!/^image\//i.test(blob.type||'')){showMsg('Clipboard does not contain a supported image');return false;}
+    if(blob.size>MAX_INSERT_IMAGE_BYTES){showMsg('Image is too large (20 MB maximum)');return false;}
+    if(!getClipboardTargetCanvas()){showMsg('Open a PDF first');return false;}
+    try{
+        showMsg(source==='clipboard'?'Pasting screenshot...':'Preparing image...');
+        const dataUrl=await readBlobAsDataUrl(blob);
+        const optimized=await optimizeInsertedImage(dataUrl,blob.type);
+        return await insertImageOnCanvas(optimized,{
+            announceMessage:source==='clipboard'?'Screenshot pasted':'Image inserted'
+        });
+    }catch(error){
+        console.error('Image preparation failed:',error);
+        showMsg('Failed to prepare image');
+        return false;
+    }
+}
 
 function optimizeInsertedImage(dataUrl,mimeType=''){
     return new Promise((resolve,reject)=>{
@@ -4480,8 +4628,8 @@ async function loadFabricImage(dataUrl){
     return new Promise(resolve=>ImageClass.fromURL(dataUrl,resolve,{crossOrigin:'anonymous'}));
 }
 
-async function insertImageOnCanvas(dataUrl){
-    const canvas=getClipboardTargetCanvas();
+async function insertImageOnCanvas(dataUrl,{targetCanvas=null,announceMessage='Image inserted'}={}){
+    const canvas=targetCanvas||getClipboardTargetCanvas();
     if(!canvas){showMsg('Open a PDF first');return;}
 
     try{
@@ -4490,23 +4638,17 @@ async function insertImageOnCanvas(dataUrl){
         const vpt=canvas.viewportTransform||[1,0,0,1,0,0];
         const canvasW=canvas.width/vpt[0];
         const canvasH=canvas.height/vpt[3];
-        const maxW=canvasW*0.5;
-        const maxH=canvasH*0.5;
-
-        let scaleX=1,scaleY=1;
-        if(img.width>maxW)scaleX=maxW/img.width;
-        if(img.height>maxH)scaleY=maxH/img.height;
-        const s=Math.min(scaleX,scaleY,1);
-
         const centerX=canvasW/2;
         const centerY=canvasH/2;
-        const x=lastCanvasMousePos&&lastCanvasMousePos.pageNum===canvas._pageNum?lastCanvasMousePos.x:centerX;
-        const y=lastCanvasMousePos&&lastCanvasMousePos.pageNum===canvas._pageNum?lastCanvasMousePos.y:centerY;
+        const desiredX=lastCanvasMousePos&&lastCanvasMousePos.pageNum===canvas._pageNum?lastCanvasMousePos.x:centerX;
+        const desiredY=lastCanvasMousePos&&lastCanvasMousePos.pageNum===canvas._pageNum?lastCanvasMousePos.y:centerY;
+        const placement=window.EditorUtils.getContainedImagePlacement(
+            img.width,img.height,canvasW,canvasH,desiredX,desiredY,0.8);
 
         img.set({
-            left:x,top:y,
+            left:placement.x,top:placement.y,
             originX:'center',originY:'center',
-            scaleX:s,scaleY:s,
+            scaleX:placement.scale,scaleY:placement.scale,
             selectable:true,evented:true,
             annotationType:'insertedImage'
         });
@@ -4516,10 +4658,12 @@ async function insertImageOnCanvas(dataUrl){
         canvas.renderAll();
         saveCanvasState(canvas);
         if(activeTool!=='select')setActiveTool('select',{announce:false});
-        showMsg('Image inserted');
+        showMsg(announceMessage);
+        return true;
     }catch(error){
         console.error('Image insertion failed:',error);
         showMsg('Failed to load image');
+        return false;
     }
 }
 
@@ -5017,7 +5161,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-08-11 09:20 PDT';
+        const built='2026-08-11 10:07 PDT';
         bd.textContent='Built '+built;
     }
 }

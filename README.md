@@ -13,6 +13,7 @@ Browser-based PDF markup tool for redlining drawings and documents. The app UI i
 - Copy or move a page's annotations to another page with automatic size remapping
 - Customize keyboard shortcuts and editor limits in Settings
 - Persist shortcut and toolbar preferences in browser storage
+- Paste Windows screenshots and other clipboard images directly onto the current PDF page
 
 ## Editable annotation layers
 
