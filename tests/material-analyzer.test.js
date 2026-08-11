@@ -58,4 +58,22 @@ assert.match(reportCsv, /^Separated\r\nWL Number,Label,Qty,Material,Length,Weigh
 assert.match(reportCsv, /\r\n\r\nCombined\r\nMaterial,Length,LengthInches,TotalQty/);
 assert.match(reportCsv, /600T125-54\(50\),"141""",141,2,54,16 GA/);
 
-console.log('material-analyzer tests passed');
+(async()=>{
+    let providerCalls=0;
+    const fakeDocument={
+        numPages:1,
+        async getPage(){
+            return {async getTextContent(){throw new Error('provider should supply cached text');}};
+        },
+    };
+    const analyzed=await analyzer.analyzePdfDocument(fakeDocument,null,async()=>{
+        providerCalls+=1;
+        return {items};
+    });
+    assert.equal(providerCalls,1);
+    assert.equal(analyzed.length,4);
+    console.log('material-analyzer tests passed');
+})().catch(error=>{
+    console.error(error);
+    process.exitCode=1;
+});

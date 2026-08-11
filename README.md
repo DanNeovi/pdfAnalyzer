@@ -32,6 +32,16 @@ written as vector PDF text, graphical overlays are rendered at 2x and cropped to
 their painted bounds, and PDF object streams are enabled. Keep the `.draftanno`
 sidecar when future editing or transfer to a revised PDF is required.
 
+Transfers use uniform contain scaling so text, circles, images, and arrowheads are
+not stretched when page aspect ratios differ. Imported layer data is type-checked,
+object/depth limited, and restricted to embedded raster images. Inserted images are
+limited to 20 MB and downscaled to a maximum 2048-pixel dimension before storage.
+
+Draft review saves materialize lazy annotated pages before export and serialize
+autosaves per page to prevent stale requests from overwriting newer edits. Text
+outside the standard PDF WinAnsi character set is rasterized automatically so
+Unicode annotations cannot abort the entire save.
+
 ## Quick Start
 
 Serve the folder with any static file server, then open `pdf-annotator.html`.
@@ -66,6 +76,11 @@ Opening the HTML file directly may work in some browsers, but a local server is 
 - `fabric.js`
 - `pdf-lib`
 
+`fabric.js` is pinned to 7.4.0 with subresource integrity. PDF.js remains on its
+legacy 3.11 browser build for compatibility and is always opened with
+`isEvalSupported: false`, the upstream mitigation for its historical eval issue.
+The page also applies a restrictive Content Security Policy.
+
 ### Regenerating the stylesheet
 
 After adding or removing Tailwind utility classes in `pdf-annotator.html` or `app.js`, rebuild the stylesheet (requires Node):
@@ -78,4 +93,6 @@ npx tailwindcss@3 -c tailwind.config.js -i src/tailwind.input.css -o tailwind.cs
 
 ```powershell
 node tests\material-analyzer.test.js
+node tests\editor-utils.test.js
+node tests\dependency-config.test.js
 ```

@@ -93,7 +93,7 @@
         });
     }
 
-    async function analyzePdfDocument(pdfDocument, onProgress) {
+    async function analyzePdfDocument(pdfDocument, onProgress, getTextContentForPage) {
         if (!pdfDocument || !Number.isFinite(pdfDocument.numPages)) {
             throw new Error('A loaded PDF document is required.');
         }
@@ -101,7 +101,9 @@
         for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
             if (typeof onProgress === 'function') onProgress(pageNumber, pdfDocument.numPages);
             const page = await pdfDocument.getPage(pageNumber);
-            const textContent = await page.getTextContent();
+            const textContent = typeof getTextContentForPage === 'function'
+                ? await getTextContentForPage(pageNumber, page)
+                : await page.getTextContent();
             rows.push(...parseSpecialStudItems(textContent.items, pageNumber));
         }
         return rows;
