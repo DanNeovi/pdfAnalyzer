@@ -5,6 +5,77 @@ if(window.pdfjsLib){
     window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
 
+// Fallback keeps the editor bootable when a stale service worker or browser
+// extension drops editor-utils.js. The standalone file remains canonical.
+if(!window.EditorUtils){
+    const clamp=(value,min,max)=>Math.min(max,Math.max(min,value));
+    const getContainTransform=(sourceWidth,sourceHeight,targetWidth,targetHeight)=>{
+        const sw=Number(sourceWidth)>0?Number(sourceWidth):Number(targetWidth)||1;
+        const sh=Number(sourceHeight)>0?Number(sourceHeight):Number(targetHeight)||1;
+        const tw=Number(targetWidth)>0?Number(targetWidth):sw;
+        const th=Number(targetHeight)>0?Number(targetHeight):sh;
+        const scale=Math.min(tw/sw,th/sh);
+        return {scale,offsetX:(tw-sw*scale)/2,offsetY:(th-sh*scale)/2};
+    };
+    const normalizeRotation=angle=>{
+        const rotation=((Math.round(Number(angle)||0)%360)+360)%360;
+        return rotation===90||rotation===180||rotation===270?rotation:0;
+    };
+    const winAnsiExtras=new Set([0x20ac,0x201a,0x0192,0x201e,0x2026,0x2020,0x2021,0x02c6,0x2030,0x0160,0x2039,0x0152,0x017d,0x2018,0x2019,0x201c,0x201d,0x2022,0x2013,0x2014,0x02dc,0x2122,0x0161,0x203a,0x0153,0x017e,0x0178]);
+    window.EditorUtils={
+        getContainTransform,
+        getContainedImagePlacement(imageWidth,imageHeight,canvasWidth,canvasHeight,desiredX,desiredY,maxFraction=0.8){
+            const iw=Math.max(1,Number(imageWidth)||1),ih=Math.max(1,Number(imageHeight)||1);
+            const cw=Math.max(1,Number(canvasWidth)||1),ch=Math.max(1,Number(canvasHeight)||1);
+            const fraction=clamp(Number(maxFraction)||0.8,0.05,1),scale=Math.min(1,(cw*fraction)/iw,(ch*fraction)/ih);
+            const width=iw*scale,height=ih*scale;
+            const requestedX=Number.isFinite(Number(desiredX))?Number(desiredX):cw/2;
+            const requestedY=Number.isFinite(Number(desiredY))?Number(desiredY):ch/2;
+            return {scale,width,height,x:width>=cw?cw/2:clamp(requestedX,width/2,cw-width/2),y:height>=ch?ch/2:clamp(requestedY,height/2,ch-height/2)};
+        },
+        getBoundsTranslationInsideContainer(bounds,containerWidth,containerHeight,padding=0){
+            const x=Number(bounds&&bounds.x)||0,y=Number(bounds&&bounds.y)||0;
+            const width=Math.max(0,Number(bounds&&bounds.width)||0),height=Math.max(0,Number(bounds&&bounds.height)||0);
+            const cw=Math.max(1,Number(containerWidth)||1),ch=Math.max(1,Number(containerHeight)||1),pad=clamp(Number(padding)||0,0,Math.min(cw,ch)/2);
+            const targetX=width>cw-pad*2?(cw-width)/2:clamp(x,pad,cw-pad-width);
+            const targetY=height>ch-pad*2?(ch-height)/2:clamp(y,pad,ch-pad-height);
+            return {dx:targetX-x,dy:targetY-y};
+        },
+        getClipboardObjectPlacement(object,sourceWidth,sourceHeight,targetWidth,targetHeight,delta=0){
+            const transform=getContainTransform(sourceWidth,sourceHeight,targetWidth,targetHeight),offset=Number(delta)||0;
+            return {left:transform.offsetX+(Number(object&&object.left)||0)*transform.scale+offset,top:transform.offsetY+(Number(object&&object.top)||0)*transform.scale+offset,scaleX:(Number(object&&object.scaleX)||1)*transform.scale,scaleY:(Number(object&&object.scaleY)||1)*transform.scale};
+        },
+        getClipboardImageBlob(clipboardData){
+            if(!clipboardData)return null;
+            for(const item of Array.from(clipboardData.items||[])){
+                if(item.kind==='file'&&/^image\//i.test(item.type||'')){
+                    const file=typeof item.getAsFile==='function'?item.getAsFile():null;
+                    if(file)return file;
+                }
+            }
+            return Array.from(clipboardData.files||[]).find(file=>/^image\//i.test(file.type||''))||null;
+        },
+        isWinAnsiCompatibleText(value){
+            for(const character of String(value||'')){
+                const code=character.codePointAt(0);
+                if(code===0x0a||code===0x0d)continue;
+                if((code>=0x20&&code<=0x7e)||(code>=0xa0&&code<=0xff)||winAnsiExtras.has(code))continue;
+                return false;
+            }
+            return true;
+        },
+        normalizeRotation,
+        rotatePixelRect(rect,sourceWidth,sourceHeight,rotation){
+            switch(normalizeRotation(rotation)){
+                case 90:return {x:rect.y,y:sourceWidth-(rect.x+rect.width),width:rect.height,height:rect.width};
+                case 180:return {x:sourceWidth-(rect.x+rect.width),y:sourceHeight-(rect.y+rect.height),width:rect.width,height:rect.height};
+                case 270:return {x:sourceHeight-(rect.y+rect.height),y:rect.x,width:rect.height,height:rect.width};
+                default:return {...rect};
+            }
+        }
+    };
+}
+
 // ─── STATE ──────────────────────────────────────────
 let pdfDoc=null,numPages=0,scale=1.5,activeTool='select';
 let currentFontSize=16,currentFontFamily='sans-serif';
@@ -5165,7 +5236,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-08-11 18:02 PDT';
+        const built='2026-08-11 18:06 PDT';
         bd.textContent='Built '+built;
     }
 }
