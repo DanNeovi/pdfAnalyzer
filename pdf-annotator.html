@@ -1079,9 +1079,11 @@
 <script src="https://cdn.jsdelivr.net/npm/fabric@7.4.0/dist/index.min.js" integrity="sha512-aZp8qCI631QgG02ShOom0Rhmi1F/f5l7k+Y3PA9hUHOcaoydNyikEwNe6fAYpCJaBwSrYkB0QeDk9IY3hT3McA==" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js" integrity="sha256-D5pcrQeUHwgmWGyU4InYm5GMRuXBfPLVo8b2ZuO8aU8=" crossorigin="anonymous"></script>
 
-<script src="editor-utils.js"></script>
-<script src="material-analyzer.js"></script>
-<script src="app.js"></script>
+<!-- Version local scripts together so an older service-worker/browser cache
+     cannot pair a new app.js with missing or stale support files. -->
+<script src="editor-utils.js?v=20260811-1"></script>
+<script src="material-analyzer.js?v=20260811-1"></script>
+<script src="app.js?v=20260811-1"></script>
 
 </body>
 </html>

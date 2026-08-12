@@ -12,5 +12,8 @@ assert.match(html, /pdf\.js\/3\.11\.174\/pdf\.min\.js[^>]+integrity="sha512-[^"]
 assert.match(html, /Content-Security-Policy/);
 assert.match(app, /isEvalSupported:false/);
 assert.match(app, /pdf\.worker\.min\.js/);
+assert.match(html, /editor-utils\.js\?v=[^"']+/);
+assert.match(html, /material-analyzer\.js\?v=[^"']+/);
+assert.match(html, /app\.js\?v=[^"']+/);
 
 console.log('dependency configuration tests passed');

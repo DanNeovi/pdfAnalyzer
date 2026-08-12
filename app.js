@@ -3069,7 +3069,11 @@ async function renderPage(n,containerOverride=null){
         fc._lastSavedState=getSerializedCanvasState(fc);
         fc.selectionFullyContained=false;
         fc.targetFindTolerance=15;
-        fc.perPixelTargetFind=true;
+        // Use object bounds for interaction. Pixel-only hit testing makes thin
+        // annotations appear selected but prevents dragging unless the next
+        // pointer-down lands on the exact painted pixels (especially lines,
+        // arrows, paths, and transparent highlight objects).
+        fc.perPixelTargetFind=false;
         fc._historySeeded=false;
         if(!savedStateByPage.has(n))savedStateByPage.set(n,fc._lastSavedState);
 
@@ -5161,7 +5165,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-08-11 10:07 PDT';
+        const built='2026-08-11 18:02 PDT';
         bd.textContent='Built '+built;
     }
 }
