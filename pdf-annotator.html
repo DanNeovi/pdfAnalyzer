@@ -121,6 +121,11 @@
             cursor: text;
         }
         .pdf-text-layer ::selection { background: rgba(59,130,246,0.35); color: transparent; }
+        .pdf-search-text-proxy {
+            position: absolute; inset: 0; overflow: hidden;
+            color: transparent; font-size: 1px; line-height: 1px;
+            white-space: pre-wrap; user-select: text; pointer-events: none;
+        }
         .filename-display {
             max-width: 200px; overflow: hidden;
             text-overflow: ellipsis; white-space: nowrap;
@@ -1083,7 +1088,7 @@
      cannot pair a new app.js with missing or stale support files. -->
 <script src="editor-utils.js?v=20260811-1"></script>
 <script src="material-analyzer.js?v=20260811-1"></script>
-<script src="app.js?v=20260811-2"></script>
+<script src="app.js?v=20260825-2"></script>
 
 </body>
 </html>

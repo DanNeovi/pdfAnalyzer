@@ -93,6 +93,7 @@ let baseScale=null;
 let currentVisiblePage=1;
 const pageViewportCache=new Map();
 let pageTextContentCache=new WeakMap();
+const searchTextByPage=new Map();
 
 const pdfViewer=document.getElementById('pdfViewer'),fileInput=document.getElementById('fileInput');
 const btnLoadPdf=document.getElementById('btnLoadPdf'),btnSavePdf=document.getElementById('btnSavePdf');
@@ -197,6 +198,7 @@ let maxStrokeSize=DEFAULT_MAX_STROKE_SIZE;
 let maxTextSize=DEFAULT_MAX_TEXT_SIZE;
 let specialStudAnalysisRows=[];
 let specialStudAnalysisRun=0;
+let specialStudAnalysisTimer=null;
 
 const FABRIC_MAJOR_VERSION=parseInt(String(window.fabric&&window.fabric.version||'5').split('.')[0],10)||5;
 
@@ -1802,6 +1804,29 @@ function compositeHighlightLayer(fc,destCtx,{destWidth,destHeight,transform=null
     destCtx.restore();
 }
 
+// Fabric's live canvas context is pre-scaled for the backing-store/device-pixel
+// ratio before it applies the viewport transform. The highlight compositor uses
+// its own raw offscreen canvas, so it must apply both transforms explicitly.
+// Using the actual backing-store dimensions is more reliable than reading the
+// current devicePixelRatio after the browser zoom level has changed.
+function getLiveCanvasRenderTransform(canvas){
+    const vpt=canvas&&canvas.viewportTransform||[1,0,0,1,0,0];
+    const logicalWidth=Math.max(1,Number(canvas&&canvas.getWidth&&canvas.getWidth())||Number(canvas&&canvas.width)||1);
+    const logicalHeight=Math.max(1,Number(canvas&&canvas.getHeight&&canvas.getHeight())||Number(canvas&&canvas.height)||1);
+    const backingWidth=Number(canvas&&canvas.lowerCanvasEl&&canvas.lowerCanvasEl.width)||logicalWidth;
+    const backingHeight=Number(canvas&&canvas.lowerCanvasEl&&canvas.lowerCanvasEl.height)||logicalHeight;
+    const scaleX=backingWidth/logicalWidth;
+    const scaleY=backingHeight/logicalHeight;
+    return [
+        vpt[0]*scaleX,
+        vpt[1]*scaleY,
+        vpt[2]*scaleX,
+        vpt[3]*scaleY,
+        vpt[4]*scaleX,
+        vpt[5]*scaleY
+    ];
+}
+
 // Toggle selectability to match the active tool. Highlights are only
 // movable/resizable when the Select tool is active. perPixelTargetFind is
 // forced off per-object because highlights render at opacity:0 (the flat
@@ -2381,10 +2406,10 @@ function syncSizeControl(){
         if(context&&context.objects.length>0&&context.objects.every(isTextObject)){
             const refText=context.objects.find(isTextObject);
             textSize=clampNumber(parseInt(refText.fontSize,10)||currentFontSize,8,maxTextSize);
-            currentFontSize=textSize;
         }
         sizeSlider.min=8;sizeSlider.max=maxTextSize;sizeSlider.step=1;
-        sizeSlider.value=textSize;sizeNumber.value=textSize;
+        sizeSlider.value=textSize;
+        if(document.activeElement!==sizeNumber)sizeNumber.value=textSize;
         sizeNumber.min=8;sizeNumber.max=maxTextSize;
         sizeLabel.textContent='Sz';
     }else{
@@ -2393,11 +2418,11 @@ function syncSizeControl(){
             const ref=context.objects.find(o=>!isTextObject(o));
             if(ref){
                 strokeSize=getControlStrokeWidthForObject(ref);
-                currentStrokeWidth=strokeSize;
             }
         }
         sizeSlider.min=1;sizeSlider.max=maxStrokeSize;sizeSlider.step=1;
-        sizeSlider.value=strokeSize;sizeNumber.value=strokeSize;
+        sizeSlider.value=strokeSize;
+        if(document.activeElement!==sizeNumber)sizeNumber.value=strokeSize;
         sizeNumber.min=1;sizeNumber.max=maxStrokeSize;
         sizeLabel.textContent='Wt';
     }
@@ -2425,6 +2450,16 @@ function syncSizeControl(){
             fillOpacityNumber.disabled=!shapeFillEnabled;
         }
     }
+}
+
+function commitSizeNumberInput(){
+    const raw=String(sizeNumber&&sizeNumber.value||'').trim();
+    const numeric=Number(raw);
+    if(!raw||!Number.isFinite(numeric)){
+        syncSizeControl();
+        return;
+    }
+    handleSizeChange(numeric);
 }
 
 function handleSizeChange(val){
@@ -2680,9 +2715,29 @@ function handleShapeEnd(){
 
     shapeCanvas._suppressHistory=true;
     switch(currentShapeKind){
-        case 'line':
-            tempShape.set({selectable:true,evented:true,hasControls:true,hasBorders:true,padding:8});
+        case 'line':{
+            // Recreate the line from its final endpoints. Mutating x2/y2 on the
+            // zero-length preview does not reliably refresh Fabric's dimensions,
+            // leaving export with a one-point bounding box that crops to a dot.
+            const x1=tempShape.x1,y1=tempShape.y1,x2=tempShape.x2,y2=tempShape.y2;
+            shapeCanvas.remove(tempShape);
+            const finishedLine=new fabric.Line([x1,y1,x2,y2],{
+                strokeWidth:currentStrokeWidth,
+                stroke:currentColor,
+                fill:currentColor,
+                strokeLineCap:'round',
+                strokeUniform:true,
+                selectable:true,
+                evented:true,
+                hasControls:true,
+                hasBorders:true,
+                padding:8,
+                annotationType:'line'
+            });
+            finishedLine.setCoords();
+            shapeCanvas.add(finishedLine);
             break;
+        }
         case 'arrow':{
             const x1=tempShape.x1,y1=tempShape.y1,x2=tempShape.x2,y2=tempShape.y2;
             shapeCanvas.remove(tempShape);
@@ -2878,14 +2933,26 @@ function getTargetPageWidth(viewportWidth){
 }
 
 function updateVisiblePage(){
-    const containers=document.querySelectorAll('.pdf-page-container');
     const mid=window.innerHeight/2;
-    let closest=1,closestDist=Infinity;
-    containers.forEach(c=>{
-        const r=c.getBoundingClientRect();
-        const d=Math.abs(r.top+r.height/2-mid);
-        if(d<closestDist){closestDist=d;closest=parseInt(c.dataset.pageNum,10);}
-    });
+    const viewerRect=pdfViewer.getBoundingClientRect();
+    const sampleX=Math.max(0,Math.min(window.innerWidth-1,
+        viewerRect.left+(Math.min(viewerRect.width,window.innerWidth)/2)));
+    const hit=document.elementFromPoint(sampleX,mid);
+    const hitPage=hit&&hit.closest&&hit.closest('.pdf-page-container');
+    let closest=hitPage?parseInt(hitPage.dataset.pageNum,10):currentVisiblePage;
+
+    // A page gap can be under the viewport midpoint. Check only the current
+    // page and its immediate neighbors instead of forcing layout on every page.
+    if(!hitPage){
+        let closestDist=Infinity;
+        for(let pageNum=Math.max(1,currentVisiblePage-2);pageNum<=Math.min(numPages,currentVisiblePage+2);pageNum++){
+            const container=document.querySelector(`[data-page-num="${pageNum}"]`);
+            if(!container)continue;
+            const rect=container.getBoundingClientRect();
+            const distance=Math.abs(rect.top+(rect.height/2)-mid);
+            if(distance<closestDist){closestDist=distance;closest=pageNum;}
+        }
+    }
     if(closest!==currentVisiblePage){
         currentVisiblePage=closest;
         const currentCanvas=fabricCanvases.get(currentVisiblePage);
@@ -2896,6 +2963,7 @@ function updateVisiblePage(){
         updatePageIndicator();
         syncSizeControl();
     }
+    schedulePristinePageRelease();
 }
 
 function getZoomKey(value){
@@ -3067,27 +3135,51 @@ async function renderPdfTextLayer(pg, viewport, container, displayWidth, display
 // Eagerly build text-only layers for every page on document load so Ctrl+F
 // can find text in pages the user hasn't scrolled to yet. Skips canvas
 // rasterisation — text extraction alone is cheap (~10-50 ms per page).
-async function buildAllTextLayersForSearch(){
-    if(!pdfDoc)return;
-    const containers=document.querySelectorAll('.pdf-page-container');
-    for(const cont of containers){
-        const n=Number(cont.dataset.pageNum);
-        if(!n)continue;
-        // Already has a text layer? Skip.
-        if(cont.querySelector('.pdf-text-layer'))continue;
-        try{
-            const pg=await pdfDoc.getPage(n);
-            const w=parseFloat(cont.style.width)||0;
-            const h=parseFloat(cont.style.height)||0;
-            // Compute viewport at the same scale used during canvas render.
-            const baseVp=pg.getViewport({scale:1});
-            const scaleNow=w?w/baseVp.width:1;
-            const vp=pg.getViewport({scale:scaleNow});
-            await renderPdfTextLayer(pg, vp, cont, w||vp.width, h||vp.height);
-        }catch(e){console.debug('eager text layer failed',n,e);}
-        // Yield so the UI stays responsive.
-        await new Promise(r=>setTimeout(r,0));
+function getSearchTextFromContent(textContent){
+    return Array.from(textContent&&textContent.items||[])
+        .map(item=>String(item&&item.str||'').trim())
+        .filter(Boolean)
+        .join(' ');
+}
+
+// Keep Ctrl+F coverage for pages that have not been rendered without building
+// a positioned DOM span for every PDF text fragment. One lightweight text node
+// per page is enough to make native find scroll to that page; the precise text
+// layer replaces it when the page is actually rendered.
+function attachSearchTextProxy(pageNum,text){
+    const normalized=String(text||'').trim();
+    if(!normalized)return;
+    searchTextByPage.set(pageNum,normalized);
+    const container=document.querySelector(`[data-page-num="${pageNum}"]`);
+    if(!container||container.querySelector('.pdf-text-layer'))return;
+    let proxy=container.querySelector('.pdf-search-text-proxy');
+    if(!proxy){
+        proxy=document.createElement('div');
+        proxy.className='pdf-search-text-proxy';
+        container.appendChild(proxy);
     }
+    proxy.textContent=normalized;
+}
+
+function isForegroundRenderingBusy(){
+    return renderingPages.size>0||activePdfRenderTasks.size>0||pendingPdfRefreshPages.size>0;
+}
+
+async function waitForForegroundRendering(runId,documentToAnalyze){
+    while(runId===specialStudAnalysisRun&&pdfDoc===documentToAnalyze){
+        while(isForegroundRenderingBusy()){
+            await new Promise(resolve=>setTimeout(resolve,40));
+            if(runId!==specialStudAnalysisRun||pdfDoc!==documentToAnalyze)break;
+        }
+        if(runId!==specialStudAnalysisRun||pdfDoc!==documentToAnalyze)break;
+        await new Promise(resolve=>{
+            if(typeof requestIdleCallback==='function')requestIdleCallback(()=>resolve(),{timeout:200});
+            else setTimeout(resolve,0);
+        });
+        // A page may have entered the render window while we waited for idle.
+        if(!isForegroundRenderingBusy())return;
+    }
+    throw new DOMException('Background PDF scan cancelled.','AbortError');
 }
 
 async function renderPage(n,containerOverride=null){
@@ -3124,11 +3216,10 @@ async function renderPage(n,containerOverride=null){
 
         if(!cont.parentElement)pdfViewer.appendChild(cont);
 
-        // Text layer for native Ctrl+F search. Built once per page; reused.
-        // Sits between the canvas and the Fabric annotation layer.
-        try{
-            await renderPdfTextLayer(pg, textViewport, cont, dw, dh);
-        }catch(e){console.debug('text layer failed',n,e);}
+        // Start the native Ctrl+F layer without making annotation interaction
+        // wait for every text fragment to be positioned.
+        void renderPdfTextLayer(pg,textViewport,cont,dw,dh)
+            .catch(e=>console.debug('text layer failed',n,e));
 
         const fabEl=document.createElement('canvas');
         fabEl.id=`fabric-canvas-${n}`;
@@ -3183,7 +3274,7 @@ async function renderPage(n,containerOverride=null){
             compositeHighlightLayer(fc, fc.contextContainer, {
                 destWidth:fc.lowerCanvasEl.width,
                 destHeight:fc.lowerCanvasEl.height,
-                transform:fc.viewportTransform
+                transform:getLiveCanvasRenderTransform(fc)
             });
         });
 
@@ -3359,12 +3450,13 @@ async function renderAllPages(){
     pageRenderObserver=null;renderedPages.clear();renderingPages.clear();fabricCanvases.clear();
     pageViewportCache.clear();
     pageTextContentCache=new WeakMap();
+    searchTextByPage.clear();
     pendingDraftPageAnnotations.clear();
     savedStateByPage.clear();historyStack.length=0;historyPointer=-1;historyTotalBytes=0;historyRestoreInProgress=false;hasPendingTextEdits=false;hasUnsavedChanges=false;
     isPanning=false;panOffsetX=0;panOffsetY=0;pdfViewer.style.transform='translate(0,0)';
     currentVisiblePage=1;activeContextPageNum=1;baseScale=null;zoomFactor=1.0;updateZoomDisplay();
     let ph=defaultPageSize.h||800;
-    const eager=Math.min(2,numPages);
+    const eager=Math.min(1,numPages);
 
     for(let i=1;i<=numPages;i++){
         const cont=document.createElement('div');
@@ -3471,7 +3563,14 @@ async function runSpecialStudAnalysis(documentToAnalyze){
         const rows=await analyzer.analyzePdfDocument(documentToAnalyze,(page,total)=>{
             if(runId!==specialStudAnalysisRun)return;
             specialStudStatus.textContent=`Scanning page ${page} of ${total} for special studs...`;
-        },(pageNumber,page)=>getCachedPageTextContent(page));
+        },async(pageNumber,page)=>{
+            // Visible page rendering always wins over the optional full-document
+            // material scan and native-find indexing.
+            await waitForForegroundRendering(runId,documentToAnalyze);
+            const textContent=await getCachedPageTextContent(page);
+            attachSearchTextProxy(pageNumber,getSearchTextFromContent(textContent));
+            return textContent;
+        });
         if(runId!==specialStudAnalysisRun||pdfDoc!==documentToAnalyze)return;
         renderSpecialStudAnalysis(rows);
     }catch(error){
@@ -3481,6 +3580,14 @@ async function runSpecialStudAnalysis(documentToAnalyze){
         specialStudStatus.classList.add('error');
         specialStudResults.hidden=true;
     }
+}
+
+function scheduleSpecialStudAnalysis(documentToAnalyze){
+    clearTimeout(specialStudAnalysisTimer);
+    specialStudAnalysisTimer=setTimeout(()=>{
+        specialStudAnalysisTimer=null;
+        if(pdfDoc===documentToAnalyze)void runSpecialStudAnalysis(documentToAnalyze);
+    },400);
 }
 
 function exportSpecialStudCsv(){
@@ -3521,6 +3628,8 @@ async function loadPDF(f){
     if(loadingOverlay)loadingOverlay.classList.remove('hidden');
     btnSavePdf.disabled=true;
     specialStudAnalysisRun+=1;
+    clearTimeout(specialStudAnalysisTimer);
+    specialStudAnalysisTimer=null;
     resetSpecialStudAnalysis();
     try{
         if(pdfDoc){
@@ -3546,10 +3655,7 @@ async function loadPDF(f){
         await renderAllPages();
         btnSavePdf.disabled=false;recomputeUnsavedChanges();
         showMsg(`PDF loaded: ${numPages} page(s)`);
-        runSpecialStudAnalysis(pdfDoc);
-        // Build text layers for every page in the background so Ctrl+F can
-        // find text on pages the user hasn't scrolled to yet. Non-blocking.
-        buildAllTextLayersForSearch().catch(e=>console.debug('text layer build failed',e));
+        scheduleSpecialStudAnalysis(pdfDoc);
     }catch(e){
         console.error('Load err:',e);
         await disposeAllFabricCanvases();
@@ -3986,11 +4092,42 @@ function showMsg(m){
 }
 
 let scrollTicking=false;
+let pristinePageReleaseTimer=null;
+
+function releaseDistantPristinePages(){
+    for(const [pageNum,canvas] of Array.from(fabricCanvases.entries())){
+        // Never park a page that has been edited, participates in history, is
+        // selected, or is close enough that the user may interact with it.
+        if(canvas._historySeeded||canvas.getObjects().length||canvas.getActiveObject())continue;
+        const container=document.querySelector(`[data-page-num="${pageNum}"]`);
+        if(!container||isContainerNearViewport(container,PDF_REFRESH_MARGIN_PX*1.5))continue;
+
+        fabricCanvases.delete(pageNum);
+        renderedPages.delete(pageNum);
+        cancelPageRenderTask(pageNum);
+        delete container.dataset.pdfZoom;
+        container.dataset.rendered='false';
+        const placeholder=document.createElement('div');
+        placeholder.className='text-sm text-gray-400 py-6 text-center';
+        placeholder.textContent='Loading page...';
+        container.replaceChildren(placeholder);
+        attachSearchTextProxy(pageNum,searchTextByPage.get(pageNum));
+        Promise.resolve(canvas.dispose()).catch(error=>console.debug('Canvas park failed',error));
+    }
+}
+
+function schedulePristinePageRelease(){
+    clearTimeout(pristinePageReleaseTimer);
+    pristinePageReleaseTimer=setTimeout(()=>{
+        pristinePageReleaseTimer=null;
+        releaseDistantPristinePages();
+    },120);
+}
+
 window.addEventListener('scroll',()=>{
     if(scrollTicking)return;scrollTicking=true;
     requestAnimationFrame(()=>{
         updateVisiblePage();
-        fabricCanvases.forEach(fc=>fc.calcOffset());
         scrollTicking=false;
     });
 },{passive:true});
@@ -4443,7 +4580,16 @@ if(highlightModeSelect){
     });
 }
 sizeSlider.addEventListener('input',()=>handleSizeChange(sizeSlider.value));
-sizeNumber.addEventListener('input',()=>handleSizeChange(sizeNumber.value));
+// Let people clear and replace the whole value without the editor clamping an
+// intermediate empty/partial value. Validation happens on blur/change.
+sizeNumber.addEventListener('change',commitSizeNumberInput);
+sizeNumber.addEventListener('keydown',event=>{
+    if(event.key==='Enter'){
+        event.preventDefault();
+        commitSizeNumberInput();
+        sizeNumber.blur();
+    }
+});
 fontFamilySelect.addEventListener('change',()=>{
     currentFontFamily=fontFamilySelect.value;
     updateSelectedObjectProperties();
@@ -5236,7 +5382,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-08-11 18:06 PDT';
+        const built='2026-08-25 16:02 PDT';
         bd.textContent='Built '+built;
     }
 }
