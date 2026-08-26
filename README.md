@@ -16,18 +16,18 @@ Browser-based PDF markup tool for redlining drawings and documents. The app UI i
 
 ## Editable annotations in saved PDFs
 
-Saving produces one self-contained PDF. The visible annotation appearance is added
-to the pages for compatibility with ordinary PDF viewers, while DraftAnnotator also
-embeds the clean source PDF and the validated Fabric object package in the same file.
-When that PDF is reopened in DraftAnnotator, the clean pages and editable objects are
-restored automatically, so annotations can be moved, changed, or deleted without a
-separate sidecar file.
+Saving produces one self-contained PDF. Each markup object is written as a standard
+PDF annotation (`FreeText`, `Line`, `Square`, `Circle`, `Ink`, or `Stamp`) with its
+own appearance stream. The original page content is not flattened or rewritten, so
+compatible editors such as Acrobat, Bluebeam, and Foxit can select, move, change, or
+delete the annotations. DraftAnnotator also embeds a small validated Fabric object
+package for lossless reopen behavior; no separate sidecar file is required.
 
 The embedded annotation package is type-checked, object/depth limited, and restricted
 to embedded raster images. Inserted images are limited to 20 MB and downscaled to a
-maximum 2048-pixel dimension before storage. Ordinary text is written as vector PDF
-text, graphical overlays are rendered at 2x and cropped to their painted bounds, and
-PDF object streams are enabled for the universally visible page appearance.
+maximum 2048-pixel dimension before storage. Every native annotation receives a
+stable DraftAnnotator ID, semantic geometry, and a cropped 2x appearance stream.
+Existing annotations from other PDF editors are preserved when the file is saved.
 
 Draft review saves materialize lazy annotated pages before export and serialize
 autosaves per page to prevent stale requests from overwriting newer edits. Text
@@ -55,6 +55,7 @@ Opening the HTML file directly may work in some browsers, but a local server is 
 - `pdf-annotator.html`: main UI and static markup
 - `app.js`: application logic for PDF rendering, annotation tools, shortcuts, settings, and export
 - `embedded-annotation-utils.js`: embedded PDF attachment encode/decode helpers
+- `native-annotation-utils.js`: native PDF annotation read/write and identity helpers
 - `material-analyzer.js`: PDF text-row parsing and summaries for special studs
 - `tailwind.css`: pre-built, committed Tailwind stylesheet served locally (no runtime CDN)
 - `tailwind.config.js` + `src/tailwind.input.css`: source for regenerating `tailwind.css`
@@ -88,4 +89,5 @@ npx tailwindcss@3 -c tailwind.config.js -i src/tailwind.input.css -o tailwind.cs
 node tests\material-analyzer.test.js
 node tests\editor-utils.test.js
 node tests\dependency-config.test.js
+node tests\native-annotation-utils.test.js
 ```

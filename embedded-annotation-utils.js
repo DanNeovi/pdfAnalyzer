@@ -7,6 +7,7 @@
 
     const SOURCE_PDF_NAME='__draftannotator_source_v1.pdf';
     const ANNOTATIONS_NAME='__draftannotator_annotations_v1.json';
+    const NATIVE_ANNOTATIONS_NAME='__draftannotator_native_annotations_v1.json';
     const MAX_ANNOTATION_BYTES=100*1024*1024;
     const MAX_SOURCE_BYTES=512*1024*1024;
 
@@ -29,6 +30,15 @@
     }
 
     function readStateFromAttachments(attachments){
+        const nativeAttachment=findAttachment(attachments,NATIVE_ANNOTATIONS_NAME);
+        if(nativeAttachment){
+            const nativeBytes=toBytes(nativeAttachment.content);
+            if(nativeBytes.length>MAX_ANNOTATION_BYTES)throw new Error('The embedded annotations are too large.');
+            let payload;
+            try{payload=JSON.parse(new TextDecoder().decode(nativeBytes));}
+            catch(error){throw new Error('The embedded DraftAnnotator annotations are invalid JSON.');}
+            return {mode:'native',sourcePdfBytes:null,payload};
+        }
         const sourceAttachment=findAttachment(attachments,SOURCE_PDF_NAME);
         const annotationAttachment=findAttachment(attachments,ANNOTATIONS_NAME);
         if(!sourceAttachment&&!annotationAttachment)return null;
@@ -45,7 +55,20 @@
         let payload;
         try{payload=JSON.parse(new TextDecoder().decode(annotationBytes));}
         catch(error){throw new Error('The embedded DraftAnnotator annotations are invalid JSON.');}
-        return {sourcePdfBytes,payload};
+        return {mode:'legacy',sourcePdfBytes,payload};
+    }
+
+    async function embedNativeStateIntoPdf(pdfDocument,payload){
+        if(!pdfDocument||typeof pdfDocument.attach!=='function')throw new Error('PDF attachment support is unavailable.');
+        const annotationBytes=new TextEncoder().encode(JSON.stringify(payload));
+        if(annotationBytes.length>MAX_ANNOTATION_BYTES){
+            throw new Error('The editable annotations are too large to embed (100 MB maximum).');
+        }
+        await pdfDocument.attach(annotationBytes,NATIVE_ANNOTATIONS_NAME,{
+            mimeType:'application/json',
+            description:'Lossless DraftAnnotator object data for native PDF annotations'
+        });
+        return annotationBytes.length;
     }
 
     async function embedStateIntoPdf(pdfDocument,sourcePdfBytes,payload){
@@ -74,7 +97,9 @@
         ANNOTATIONS_NAME,
         MAX_ANNOTATION_BYTES,
         MAX_SOURCE_BYTES,
+        NATIVE_ANNOTATIONS_NAME,
         SOURCE_PDF_NAME,
+        embedNativeStateIntoPdf,
         embedStateIntoPdf,
         findAttachment,
         hasPdfHeader,

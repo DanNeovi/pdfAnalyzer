@@ -1002,7 +1002,7 @@
                                 Toolbar controls update to these limits after you save. Existing annotations are not deleted; this only changes the control range.
                             </div>
                             <div class="rounded-2xl bg-indigo-50 border border-indigo-100 px-4 py-3 text-xs text-indigo-900 leading-relaxed">
-                                Saved PDFs keep DraftAnnotator markup editable. Reopen the PDF here to move, change, or delete annotations—no separate layer file is required.
+                                Saved markup uses standard PDF annotations, so it remains selectable in DraftAnnotator and compatible editors such as Acrobat, Bluebeam, and Foxit. No separate layer file is required.
                             </div>
                         </div>
                     </section>
@@ -1029,7 +1029,7 @@
                 <div class="flex items-center justify-between flex-wrap gap-2">
                     <div class="flex items-center gap-3">
                         <span class="text-xs font-bold text-gray-400 uppercase tracking-wide">Draft Annotator</span>
-                        <span class="text-xs font-mono text-gray-400" id="buildVersion">v21</span>
+                        <span class="text-xs font-mono text-gray-400" id="buildVersion">v22</span>
                         <span class="text-xs text-gray-400" id="buildDate"></span>
                     </div>
                     <a href="https://github.com/DanNeovi/pdfAnalyzer" target="_blank" rel="noopener noreferrer"
@@ -1066,10 +1066,11 @@
 
 <!-- Version local scripts together so an older service-worker/browser cache
      cannot pair a new app.js with missing or stale support files. -->
-<script src="embedded-annotation-utils.js?v=20260826-1"></script>
+<script src="embedded-annotation-utils.js?v=20260826-2"></script>
+<script src="native-annotation-utils.js?v=20260826-2"></script>
 <script src="editor-utils.js?v=20260811-1"></script>
 <script src="material-analyzer.js?v=20260811-1"></script>
-<script src="app.js?v=20260826-1"></script>
+<script src="app.js?v=20260826-2"></script>
 
 </body>
 </html>

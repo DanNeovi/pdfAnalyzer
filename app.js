@@ -150,6 +150,7 @@ const savedStateByPage=new Map();
 const pendingEmbeddedPageAnnotations=new Map();
 const historyStack=[];
 let historyPointer=-1;
+const SERIALIZED_ANNOTATION_PROPS=['annotationType','selectable','evented','_hlBaseColor','draftAnnotationId'];
 const CLIPBOARD_OBJECT_PROPS=['annotationType','_hlBaseColor'];
 const KEYBOARD_PASTE_OFFSET=15;
 const INTERNAL_CLIPBOARD_MIME='application/x-draftannotator-objects';
@@ -1171,7 +1172,20 @@ function persistHighlightModePreference(){
 
 // ─── HISTORY SYSTEM ─────────────────────────────────
 function getSerializedCanvasState(c){
-    return JSON.stringify(c.toJSON(['annotationType','selectable','evented','_hlBaseColor']));
+    return JSON.stringify(c.toJSON(SERIALIZED_ANNOTATION_PROPS));
+}
+
+let draftAnnotationIdSequence=0;
+function createDraftAnnotationId(){
+    if(window.crypto&&typeof window.crypto.randomUUID==='function')return window.crypto.randomUUID();
+    draftAnnotationIdSequence+=1;
+    return `${Date.now().toString(36)}-${draftAnnotationIdSequence.toString(36)}-${Math.random().toString(36).slice(2,10)}`;
+}
+
+function ensureDraftAnnotationId(object){
+    if(!object)return '';
+    if(!object.draftAnnotationId)object.draftAnnotationId=createDraftAnnotationId();
+    return object.draftAnnotationId;
 }
 
 function syncPendingTextEdits(){
@@ -1236,8 +1250,8 @@ function saveCanvasState(c){
 }
 
 // DraftAnnotator stores this validated Fabric package inside each saved PDF.
-// The clean source PDF is embedded alongside it so reopening can render the
-// unmarked pages and restore every annotation as an editable object.
+// Standard annotations provide interoperability; this package preserves the
+// exact Fabric objects when the PDF is reopened here.
 const ANNOTATION_FORMAT='draftannotator.annotations';
 const ANNOTATION_FORMAT_VERSION=1;
 
@@ -1254,12 +1268,12 @@ async function materializePendingAnnotations(){
     for(const pageNumber of pendingPages)await ensureAnnotationPageRendered(pageNumber);
 }
 
-async function createAnnotationPackage(){
+async function createAnnotationPackage(nativeDescriptors=[]){
     await materializePendingAnnotations();
     const pages=[];
     fabricCanvases.forEach((canvas,pageNumber)=>{
         const size=annotationPageSize(canvas);
-        const json=canvas.toJSON(['annotationType','selectable','evented','_hlBaseColor']);
+        const json=canvas.toJSON(SERIALIZED_ANNOTATION_PROPS);
         if(json.objects&&json.objects.length){
             pages.push({pageNumber,width:size.width,height:size.height,fabric:json});
         }
@@ -1268,7 +1282,11 @@ async function createAnnotationPackage(){
         format:ANNOTATION_FORMAT,
         version:ANNOTATION_FORMAT_VERSION,
         source:{fileName:currentFileName||'',pageCount:numPages},
-        pages
+        pages,
+        nativeAnnotations:{
+            version:window.NativeAnnotationUtils.NATIVE_FORMAT_VERSION,
+            descriptors:nativeDescriptors.map(nativeDescriptorSnapshot)
+        }
     };
 }
 
@@ -1293,6 +1311,24 @@ function ensureAnnotationPackage(value){
         }
         validatePortableFabricJson(page.fabric);
     });
+    if(value.nativeAnnotations!==undefined){
+        const native=value.nativeAnnotations;
+        if(!native||native.version!==window.NativeAnnotationUtils.NATIVE_FORMAT_VERSION||!Array.isArray(native.descriptors)){
+            throw new Error('Embedded native annotation metadata is invalid.');
+        }
+        if(native.descriptors.length>10000)throw new Error('Embedded native annotation metadata contains too many objects.');
+        native.descriptors.forEach(descriptor=>{
+            if(!descriptor||typeof descriptor.id!=='string'||!descriptor.id||descriptor.id.length>200){
+                throw new Error('Embedded native annotation ID is invalid.');
+            }
+            if(!Number.isInteger(Number(descriptor.pageIndex))||Number(descriptor.pageIndex)<0){
+                throw new Error('Embedded native annotation page is invalid.');
+            }
+            if(!Array.isArray(descriptor.rect)||descriptor.rect.length!==4||descriptor.rect.some(value=>!Number.isFinite(Number(value)))){
+                throw new Error('Embedded native annotation rectangle is invalid.');
+            }
+        });
+    }
     return value;
 }
 
@@ -1300,7 +1336,22 @@ async function readEmbeddedAnnotationState(pdfProxy){
     if(!pdfProxy||typeof pdfProxy.getAttachments!=='function')return null;
     const attachments=await pdfProxy.getAttachments();
     const state=window.EmbeddedAnnotationUtils.readStateFromAttachments(attachments);
-    return state?{sourcePdfBytes:state.sourcePdfBytes,payload:ensureAnnotationPackage(state.payload)}:null;
+    return state?{
+        mode:state.mode||'legacy',
+        sourcePdfBytes:state.sourcePdfBytes,
+        payload:ensureAnnotationPackage(state.payload)
+    }:null;
+}
+
+async function createNativeEditingPdf(pdfBytes){
+    const {PDFDocument}=window.PDFLib;
+    let document;
+    try{document=await PDFDocument.load(pdfBytes);}
+    catch(error){document=await PDFDocument.load(pdfBytes,{ignoreEncryption:true});}
+    const descriptors=window.NativeAnnotationUtils.readDraftNativeAnnotations(document,window.PDFLib);
+    window.NativeAnnotationUtils.stripDraftNativeAnnotations(document,window.PDFLib);
+    const displayBytes=await document.save({useObjectStreams:true});
+    return {descriptors,displayBytes};
 }
 
 const PORTABLE_FABRIC_TYPES=new Set([
@@ -1324,6 +1375,10 @@ function validatePortableFabricJson(fabricJson){
         }
         if(type==='path'&&Array.isArray(object.path)&&object.path.length>100000){
             throw new Error('Annotation path is too complex.');
+        }
+        if(object.draftAnnotationId!==undefined&&
+            (typeof object.draftAnnotationId!=='string'||!object.draftAnnotationId||object.draftAnnotationId.length>200)){
+            throw new Error('Annotation object ID is invalid.');
         }
         const children=Array.isArray(object.objects)?object.objects:(Array.isArray(object._objects)?object._objects:[]);
         children.forEach(child=>visit(child,depth+1));
@@ -1353,6 +1408,7 @@ async function enlivenFabricObjects(objects){
         const source=serialized[index]||{};
         if(source.annotationType)object.annotationType=source.annotationType;
         if(source._hlBaseColor)object._hlBaseColor=source._hlBaseColor;
+        if(source.draftAnnotationId)object.draftAnnotationId=source.draftAnnotationId;
     });
     return enlivened||[];
 }
@@ -1361,6 +1417,9 @@ async function restoreEmbeddedPageAnnotations(targetCanvas,pageData){
     validatePortableFabricJson(pageData&&pageData.fabric);
     const objects=await enlivenFabricObjects(pageData.fabric.objects);
     const target=annotationPageSize(targetCanvas);
+    const nativeActual=pageData._nativeActualById||new Map();
+    const nativeSaved=pageData._nativeSavedById||new Map();
+    const jsPage=(nativeActual.size&&nativeSaved.size)?await pdfDoc.getPage(targetCanvas._pageNum):null;
     const {scale:scaleFactor,offsetX,offsetY}=window.EditorUtils.getContainTransform(
         Number(pageData.width),Number(pageData.height),target.width,target.height);
     targetCanvas._restoring=true;
@@ -1374,6 +1433,11 @@ async function restoreEmbeddedPageAnnotations(targetCanvas,pageData){
                 scaleX:(Number(object.scaleX)||1)*scaleFactor,
                 scaleY:(Number(object.scaleY)||1)*scaleFactor
             });
+            const actual=nativeActual.get(object.draftAnnotationId);
+            const saved=nativeSaved.get(object.draftAnnotationId);
+            if(actual&&saved&&!nativeDescriptorsEqual(actual,saved)){
+                reconcileFabricObjectWithNativeAnnotation(object,actual,saved,targetCanvas,jsPage);
+            }
             if(isHighlightLayerObject(object)){
                 normalizeHighlightVisual(object);
                 applyHighlightSelectability(object,activeTool==='select');
@@ -1396,15 +1460,111 @@ async function restoreEmbeddedPageAnnotations(targetCanvas,pageData){
     return objects.length;
 }
 
-async function hydrateEmbeddedAnnotations(payload){
+function roundedNativeValue(value){
+    if(Array.isArray(value))return value.map(roundedNativeValue);
+    if(typeof value==='number')return Math.round(value*1000)/1000;
+    return value===undefined?null:value;
+}
+
+function nativeDescriptorsEqual(actual,saved){
+    const keys=['kind','rect','color','fillColor','opacity','width','contents','line','inkLists','vertices'];
+    return keys.every(key=>JSON.stringify(roundedNativeValue(actual[key]))===JSON.stringify(roundedNativeValue(saved[key])));
+}
+
+function mapPdfPointToDisplay(pdfPoint,rot,pxW,pxH,boxX,boxY,boxW,boxH){
+    const u=boxW?(pdfPoint.x-boxX)/boxW:0;
+    const v=boxH?(pdfPoint.y-boxY)/boxH:0;
+    switch(rot){
+        case 90:return {x:v*pxW,y:u*pxH};
+        case 180:return {x:(1-u)*pxW,y:v*pxH};
+        case 270:return {x:(1-v)*pxW,y:(1-u)*pxH};
+        default:return {x:u*pxW,y:(1-v)*pxH};
+    }
+}
+
+function nativeRectToDisplayBounds(rect,canvas,jsPage){
+    if(!Array.isArray(rect)||rect.length!==4||!jsPage)return null;
+    const view=jsPage.view||[0,0,1,1];
+    const rot=normalizeRotationAngle(jsPage.rotate);
+    const target=annotationPageSize(canvas);
+    const points=[
+        mapPdfPointToDisplay({x:rect[0],y:rect[1]},rot,target.width,target.height,view[0],view[1],view[2]-view[0],view[3]-view[1]),
+        mapPdfPointToDisplay({x:rect[2],y:rect[3]},rot,target.width,target.height,view[0],view[1],view[2]-view[0],view[3]-view[1])
+    ];
+    return {
+        left:Math.min(points[0].x,points[1].x),
+        top:Math.min(points[0].y,points[1].y),
+        width:Math.abs(points[1].x-points[0].x),
+        height:Math.abs(points[1].y-points[0].y)
+    };
+}
+
+function nativeRgbToHex(color){
+    if(!Array.isArray(color)||color.length<3)return '#000000';
+    return '#'+color.slice(0,3).map(value=>Math.round(Math.max(0,Math.min(1,Number(value)||0))*255).toString(16).padStart(2,'0')).join('');
+}
+
+function reconcileFabricObjectWithNativeAnnotation(object,actual,saved,canvas,jsPage){
+    const oldBounds=nativeRectToDisplayBounds(saved.rect,canvas,jsPage);
+    const newBounds=nativeRectToDisplayBounds(actual.rect,canvas,jsPage);
+    if(oldBounds&&newBounds&&oldBounds.width>0&&oldBounds.height>0){
+        const current=object.getBoundingRect(true,true);
+        const scaleX=newBounds.width/oldBounds.width;
+        const scaleY=newBounds.height/oldBounds.height;
+        const targetLeft=newBounds.left+((current.left-oldBounds.left)*scaleX);
+        const targetTop=newBounds.top+((current.top-oldBounds.top)*scaleY);
+        object.set({
+            scaleX:(Number(object.scaleX)||1)*scaleX,
+            scaleY:(Number(object.scaleY)||1)*scaleY
+        });
+        object.setCoords();
+        const scaled=object.getBoundingRect(true,true);
+        object.set({
+            left:(Number(object.left)||0)+(targetLeft-scaled.left),
+            top:(Number(object.top)||0)+(targetTop-scaled.top)
+        });
+    }
+    const color=nativeRgbToHex(actual.color);
+    if(isTextObject(object)){
+        object.set({text:String(actual.contents||''),fill:color});
+        if(object.initDimensions)object.initDimensions();
+    }else if(isArrowGroup(object)){
+        const widthRatio=Number(saved.width)>0&&Number(actual.width)>0?Number(actual.width)/Number(saved.width):1;
+        setArrowGroupAppearance(object,getStrokeWidthForObject(object)*widthRatio,color);
+    }else if(!isHighlightLayerObject(object)){
+        const widthRatio=Number(saved.width)>0&&Number(actual.width)>0?Number(actual.width)/Number(saved.width):1;
+        object.set({stroke:color,strokeWidth:(Number(object.strokeWidth)||1)*widthRatio});
+    }else{
+        object._hlBaseColor=color;
+    }
+    if(Array.isArray(actual.fillColor)&&supportsFillObject(object))object.set({fill:nativeRgbToHex(actual.fillColor)});
+    object.setCoords();
+}
+
+async function hydrateEmbeddedAnnotations(payload,nativeDescriptors=[]){
     let restored=0;
+    const hasNativeState=!!(payload.nativeAnnotations&&payload.nativeAnnotations.version===window.NativeAnnotationUtils.NATIVE_FORMAT_VERSION&&
+        Array.isArray(payload.nativeAnnotations.descriptors));
+    const actualById=new Map((nativeDescriptors||[]).map(descriptor=>[descriptor.id,descriptor]));
+    const savedById=new Map(hasNativeState
+        ?payload.nativeAnnotations.descriptors.map(descriptor=>[descriptor.id,descriptor])
+        :[]);
     for(const pageData of payload.pages){
         const pageNumber=Number(pageData.pageNumber);
         if(pageNumber<1||pageNumber>numPages)continue;
-        restored+=pageData.fabric.objects.length;
+        const objects=hasNativeState
+            ?pageData.fabric.objects.filter(object=>object.draftAnnotationId&&actualById.has(object.draftAnnotationId))
+            :pageData.fabric.objects;
+        const restorablePage={
+            ...pageData,
+            fabric:{...pageData.fabric,objects},
+            _nativeActualById:actualById,
+            _nativeSavedById:savedById
+        };
+        restored+=objects.length;
         const canvas=fabricCanvases.get(pageNumber);
-        if(canvas)await restoreEmbeddedPageAnnotations(canvas,pageData);
-        else pendingEmbeddedPageAnnotations.set(pageNumber,pageData);
+        if(canvas)await restoreEmbeddedPageAnnotations(canvas,restorablePage);
+        else pendingEmbeddedPageAnnotations.set(pageNumber,restorablePage);
     }
     recomputeUnsavedChanges();
     return restored;
@@ -1440,6 +1600,7 @@ function undo(){
     },(o,obj)=>{
         if(o.annotationType)obj.annotationType=o.annotationType;
         if(o._hlBaseColor)obj._hlBaseColor=o._hlBaseColor;
+        if(o.draftAnnotationId)obj.draftAnnotationId=o.draftAnnotationId;
     }).catch(error=>{
         canvas._restoring=false;historyRestoreInProgress=false;historyPointer++;
         console.error('Undo restore failed:',error);showMsg('Undo failed');
@@ -1481,6 +1642,7 @@ function redo(){
     },(o,obj)=>{
         if(o.annotationType)obj.annotationType=o.annotationType;
         if(o._hlBaseColor)obj._hlBaseColor=o._hlBaseColor;
+        if(o.draftAnnotationId)obj.draftAnnotationId=o.draftAnnotationId;
     }).catch(error=>{
         canvas._restoring=false;historyRestoreInProgress=false;historyPointer--;
         console.error('Redo restore failed:',error);showMsg('Redo failed');
@@ -1741,7 +1903,7 @@ function normalizeHighlightVisual(obj){
 function compositeHighlightLayer(fc,destCtx,{destWidth,destHeight,transform=null}={}){
     if(!fc||!destCtx)return;
     // Skip the temp shape: it renders itself live (rgba + opacity:1) during drag.
-    const hls=fc.getObjects().filter(o=>isHighlightLayerObject(o)&&!o._hlTempShape);
+    const hls=fc.getObjects().filter(o=>o.visible!==false&&isHighlightLayerObject(o)&&!o._hlTempShape);
     if(!hls.length)return;
     const w=destWidth||destCtx.canvas.width;
     const h=destHeight||destCtx.canvas.height;
@@ -3265,6 +3427,7 @@ async function renderPage(n,containerOverride=null){
         fc.on('object:added',e=>{
             const obj=e&&e.target;
             if(!obj)return;
+            ensureDraftAnnotationId(obj);
             if(isHighlightLayerObject(obj)){
                 normalizeHighlightVisual(obj);
                 applyHighlightSelectability(obj, activeTool==='select');
@@ -3625,10 +3788,11 @@ async function loadPDF(f){
         // font matrices executing JS) on pdf.js builds older than 4.2.67.
         pdfDoc=await pdfjsLib.getDocument({data:originalPdfBytes.slice(),isEvalSupported:false}).promise;
         let embeddedState=null;
+        let nativeDescriptors=[];
         let embeddedWarning='';
         try{
             embeddedState=await readEmbeddedAnnotationState(pdfDoc);
-            if(embeddedState){
+            if(embeddedState&&embeddedState.mode==='legacy'){
                 const sourceProxy=await pdfjsLib.getDocument({data:embeddedState.sourcePdfBytes.slice(),isEvalSupported:false}).promise;
                 const expectedPages=Number(embeddedState.payload.source&&embeddedState.payload.source.pageCount);
                 if(Number.isInteger(expectedPages)&&expectedPages>0&&sourceProxy.numPages!==expectedPages){
@@ -3639,6 +3803,14 @@ async function loadPDF(f){
                 pdfDoc=sourceProxy;
                 originalPdfBytes=embeddedState.sourcePdfBytes;
                 try{await wrapperProxy.destroy();}catch(error){console.debug('PDF wrapper cleanup failed',error);}
+            }else if(embeddedState&&embeddedState.mode==='native'){
+                const editablePdf=await createNativeEditingPdf(uploadedPdfBytes);
+                const displayProxy=await pdfjsLib.getDocument({data:editablePdf.displayBytes.slice(),isEvalSupported:false}).promise;
+                const wrapperProxy=pdfDoc;
+                pdfDoc=displayProxy;
+                nativeDescriptors=editablePdf.descriptors;
+                originalPdfBytes=uploadedPdfBytes;
+                try{await wrapperProxy.destroy();}catch(error){console.debug('PDF wrapper cleanup failed',error);}
             }
         }catch(error){
             console.warn('Embedded DraftAnnotator data could not be restored:',error);
@@ -3648,7 +3820,7 @@ async function loadPDF(f){
         }
         numPages=pdfDoc.numPages;
         await renderAllPages();
-        const restoredCount=embeddedState?await hydrateEmbeddedAnnotations(embeddedState.payload):0;
+        const restoredCount=embeddedState?await hydrateEmbeddedAnnotations(embeddedState.payload,nativeDescriptors):0;
         btnSavePdf.disabled=false;recomputeUnsavedChanges();
         showMsg(embeddedState
             ?`PDF loaded: ${restoredCount} editable annotation(s) restored`
@@ -3689,45 +3861,12 @@ function canvasToPngBytes(canvas){
     return bytes;
 }
 
-function hasTextStyleOverrides(obj){
-    const styles=obj&&obj.styles;
-    if(!styles||typeof styles!=='object')return false;
-    return Object.values(styles).some(lineStyles=>{
-        if(!lineStyles||typeof lineStyles!=='object')return false;
-        return Object.values(lineStyles).some(charStyle=>charStyle&&typeof charStyle==='object'&&Object.keys(charStyle).length>0);
-    });
-}
-
-function shouldRasterizeTextForPdf(obj){
-    if(!isTextObject(obj))return false;
-    if(!window.EditorUtils.isWinAnsiCompatibleText(obj.text))return true;
-    const scaleX=Math.abs(Number(obj.scaleX)||1);
-    const scaleY=Math.abs(Number(obj.scaleY)||1);
-    if(Math.abs(scaleX-1)>0.001||Math.abs(scaleY-1)>0.001)return true;
-    if(Math.abs(Number(obj.skewX)||0)>0.001||Math.abs(Number(obj.skewY)||0)>0.001)return true;
-    if(hasTextStyleOverrides(obj))return true;
-    if(obj.stroke&&obj.stroke!=='transparent'&&(Number(obj.strokeWidth)||0)>0)return true;
-    if((Number(obj.charSpacing)||0)!==0)return true;
-    if(obj.textBackgroundColor||obj.underline||obj.linethrough||obj.overline)return true;
-    return false;
-}
-
-function getExportSourceCanvas(fc,multiplier=1,includeText=true){
+function getExportSourceCanvas(fc,multiplier=1){
     // Prefer fabric's export path so vectors/text are rerendered at higher resolution.
     // NOTE: caller must reset viewport transform to identity before calling this.
     // Highlights are stored with opacity:0 — Fabric's native export draws nothing
     // for them. We layer them in via compositeHighlightLayer so the exported PDF
     // has the same flat-marker look as the screen.
-    const hiddenText=[];
-    if(fc&&!includeText){
-        fc.getObjects().forEach(o=>{
-            if(isTextObject(o)&&o.visible!==false&&!shouldRasterizeTextForPdf(o)){
-                hiddenText.push(o);
-                o.visible=false;
-            }
-        });
-        if(hiddenText.length)fc.renderAll();
-    }
     let baseCanvas=null;
     try{
         if(fc&&typeof fc.toCanvasElement==='function'){
@@ -3735,12 +3874,6 @@ function getExportSourceCanvas(fc,multiplier=1,includeText=true){
             if(exported&&exported.width&&exported.height)baseCanvas=exported;
         }
     }catch(e){}
-    finally{
-        if(hiddenText.length){
-            hiddenText.forEach(o=>{o.visible=true;});
-            fc.renderAll();
-        }
-    }
     if(!baseCanvas)baseCanvas=fc?fc.lowerCanvasEl:null;
     if(!baseCanvas)return null;
     // Paint the flat highlight layer on top of the exported base canvas.
@@ -3759,8 +3892,8 @@ function getExportSourceCanvas(fc,multiplier=1,includeText=true){
     return baseCanvas;
 }
 
-function buildNormalizedOverlayCanvas(fc,rotation,multiplier=SAVE_OVERLAY_SCALE,includeText=true){
-    const src=getExportSourceCanvas(fc,multiplier,includeText);
+function buildNormalizedOverlayCanvas(fc,rotation,multiplier=SAVE_OVERLAY_SCALE){
+    const src=getExportSourceCanvas(fc,multiplier);
     if(!src||!src.width||!src.height)return null;
 
     const rot=normalizeRotationAngle(rotation);
@@ -3794,65 +3927,7 @@ function buildNormalizedOverlayCanvas(fc,rotation,multiplier=SAVE_OVERLAY_SCALE,
     return out;
 }
 
-function getRasterAnnotationBounds(canvas,multiplier=1,padding=4){
-    const rasterObjects=canvas.getObjects().filter(object=>
-        object&&object.visible!==false&&(!isTextObject(object)||shouldRasterizeTextForPdf(object)));
-    if(!rasterObjects.length)return null;
-    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
-    rasterObjects.forEach(object=>{
-        const bounds=object.getBoundingRect(true,true);
-        minX=Math.min(minX,bounds.left*multiplier);
-        minY=Math.min(minY,bounds.top*multiplier);
-        maxX=Math.max(maxX,(bounds.left+bounds.width)*multiplier);
-        maxY=Math.max(maxY,(bounds.top+bounds.height)*multiplier);
-    });
-    return {x:minX-padding,y:minY-padding,width:(maxX-minX)+(padding*2),height:(maxY-minY)+(padding*2)};
-}
-
-function cropCanvasToAnnotationBounds(canvas,fabricCanvas,rotation,multiplier=1){
-    if(!canvas||!canvas.width||!canvas.height||!fabricCanvas)return null;
-    const rot=normalizeRotationAngle(rotation);
-    const sourceWidth=(rot===90||rot===270)?canvas.height:canvas.width;
-    const sourceHeight=(rot===90||rot===270)?canvas.width:canvas.height;
-    const unrotatedBounds=getRasterAnnotationBounds(fabricCanvas,multiplier);
-    if(!unrotatedBounds)return null;
-    const bounds=window.EditorUtils.rotatePixelRect(unrotatedBounds,sourceWidth,sourceHeight,rot);
-    const minX=Math.max(0,Math.floor(bounds.x));
-    const minY=Math.max(0,Math.floor(bounds.y));
-    const maxX=Math.min(canvas.width,Math.ceil(bounds.x+bounds.width));
-    const maxY=Math.min(canvas.height,Math.ceil(bounds.y+bounds.height));
-    if(maxX<=minX||maxY<=minY)return null;
-    const cropped=document.createElement('canvas');
-    cropped.width=maxX-minX;cropped.height=maxY-minY;
-    cropped.getContext('2d').drawImage(canvas,minX,minY,cropped.width,cropped.height,0,0,cropped.width,cropped.height);
-    return {canvas:cropped,x:minX,y:minY,sourceWidth:canvas.width,sourceHeight:canvas.height};
-}
-
 const _colorParseCtx=document.createElement('canvas').getContext('2d');
-function fabricColorToPdfPaint(colorStr,rgbFn){
-    try{
-        const ctx=_colorParseCtx;
-        ctx.fillStyle=colorStr||'black';
-        const c=ctx.fillStyle;
-        if(c.startsWith('#')){
-            const hex=c.slice(1);
-            const full=hex.length===3?hex.split('').map(ch=>ch+ch).join(''):hex;
-            const num=parseInt(full,16);
-            return {
-                color:rgbFn(((num>>16)&255)/255,((num>>8)&255)/255,(num&255)/255),
-                alpha:1
-            };
-        }
-        const rgba=c.match(/^rgba?\((\d+), ?(\d+), ?(\d+)(?:, ?([0-9]*\.?[0-9]+))?\)/i);
-        if(rgba){
-            return {
-                color:rgbFn(parseInt(rgba[1],10)/255,parseInt(rgba[2],10)/255,parseInt(rgba[3],10)/255),
-                alpha:rgba[4]!==undefined?Math.max(0,Math.min(1,parseFloat(rgba[4]))):1
-            };
-        }
-    }catch(e){}
-    return {color:rgbFn(0,0,0),alpha:1};
-}
 
 function mapDisplayPointToPdf(displayPoint,rot,pxW,pxH,boxX,boxY,boxW,boxH){
     const nx=pxW?displayPoint.x/pxW:0;
@@ -3865,52 +3940,232 @@ function mapDisplayPointToPdf(displayPoint,rot,pxW,pxH,boxX,boxY,boxW,boxH){
     }
 }
 
-function drawTextObjectsAsVector(fc,page,rot,box,pdfHelpers){
-    const {degrees,rgb,pickFont}=pdfHelpers;
-    const pxW=fc.getWidth(),pxH=fc.getHeight();
-    const drawOne=obj=>{
-        if(!obj||obj.visible===false)return;
-        if(isFabricType(obj,'group')){
-            (obj._objects||[]).forEach(drawOne);
-            return;
+function nativeDescriptorSnapshot(descriptor){
+    const snapshot={};
+    for(const key of ['id','pageIndex','kind','rect','color','fillColor','opacity','width','contents','fontSize','alignment','line','inkLists','vertices','lineEndings']){
+        if(descriptor[key]!==undefined)snapshot[key]=descriptor[key];
+    }
+    return snapshot;
+}
+
+function parseCssColor(color,defaultColor=[0,0,0]){
+    try{
+        _colorParseCtx.fillStyle='#000000';
+        _colorParseCtx.fillStyle=color||'#000000';
+        const normalized=_colorParseCtx.fillStyle;
+        if(/^#[0-9a-f]{6}$/i.test(normalized)){
+            return [
+                parseInt(normalized.slice(1,3),16)/255,
+                parseInt(normalized.slice(3,5),16)/255,
+                parseInt(normalized.slice(5,7),16)/255
+            ];
         }
-        if(!isTextObject(obj)||shouldRasterizeTextForPdf(obj))return;
-        const rawText=(obj.text||'');
-        if(!rawText.trim())return;
+        const match=normalized.match(/^rgba?\((\d+), ?(\d+), ?(\d+)/i);
+        if(match)return [Number(match[1])/255,Number(match[2])/255,Number(match[3])/255];
+    }catch(error){}
+    return defaultColor.slice();
+}
 
-        const matrix=obj.calcTransformMatrix();
-        const tp=(lx,ly)=>{
-            const p=fabric.util.transformPoint(new fabric.Point(lx,ly),matrix);
-            return mapDisplayPointToPdf(p,rot,pxW,pxH,box.x,box.y,box.w,box.h);
-        };
-        const origin=tp(0,0),xAxis=tp(1,0),yAxis=tp(0,1);
-        const xVec={x:xAxis.x-origin.x,y:xAxis.y-origin.y};
-        const yVec={x:yAxis.x-origin.x,y:yAxis.y-origin.y};
-        const yScale=Math.hypot(yVec.x,yVec.y);
-        if(!Number.isFinite(yScale)||yScale===0)return;
+function fabricObjectNativeKind(object){
+    if(isTextObject(object))return 'freeText';
+    if(isArrowGroup(object))return object.annotationType==='doubleArrow'?'doubleArrow':'arrow';
+    if(isFabricType(object,'line'))return 'line';
+    if(isFabricType(object,'rect'))return object.annotationType==='highlightBox'?'highlightBox':'square';
+    if(isFabricType(object,'ellipse'))return object.annotationType==='highlightEllipse'?'highlightEllipse':'circle';
+    if(isFabricType(object,'path')){
+        if(object.annotationType==='cloud')return 'cloud';
+        if(object.annotationType==='highlightPen')return 'highlightPen';
+        return 'ink';
+    }
+    return 'stamp';
+}
 
-        const angle=Math.atan2(xVec.y,xVec.x)*180/Math.PI;
-        const baseFontSize=obj.fontSize||12;
-        const fontSize=baseFontSize*yScale;
-        const lineHeightPx=(obj.lineHeight||1.16)*baseFontSize;
-        const paint=fabricColorToPdfPaint(obj.fill,rgb);
-        const objOpacity=obj.opacity!==undefined?obj.opacity:1;
-        const opacity=Math.max(0,Math.min(1,objOpacity*paint.alpha));
-        const w2=(obj.width||0)/2,h2=(obj.height||0)/2;
-        rawText.split(/\r?\n/).forEach((line,idx)=>{
-            const baseline=tp(-w2,-h2+baseFontSize+(idx*lineHeightPx));
-            page.drawText(line,{
-                x:baseline.x,
-                y:baseline.y,
-                size:fontSize,
-                font:pickFont(obj.fontFamily,obj.fontWeight),
-                color:paint.color,
-                rotate:degrees(angle),
-                opacity
-            });
-        });
+function getNativeStrokeSource(object,kind){
+    if(kind==='arrow'||kind==='doubleArrow')return (object._objects||[]).find(part=>isFabricType(part,'line'))||object;
+    return object;
+}
+
+function transformFabricPoint(object,x,y){
+    const matrix=object.calcTransformMatrix();
+    return fabric.util.transformPoint(new fabric.Point(x,y),matrix);
+}
+
+function getNativeLinePoints(object,kind,mapPoint){
+    if(kind!=='line'&&kind!=='arrow'&&kind!=='doubleArrow')return [];
+    const line=getNativeStrokeSource(object,kind);
+    if(!line||typeof line.calcLinePoints!=='function')return [];
+    const points=line.calcLinePoints();
+    const start=mapPoint(transformFabricPoint(line,points.x1,points.y1));
+    const end=mapPoint(transformFabricPoint(line,points.x2,points.y2));
+    return [start.x,start.y,end.x,end.y];
+}
+
+function sampleNativeInkPath(object,mapPoint){
+    if(!Array.isArray(object.path)||!object.path.length)return [];
+    const offset=object.pathOffset||{x:0,y:0};
+    const points=[];
+    let current={x:0,y:0};
+    let start={x:0,y:0};
+    const add=(x,y)=>{
+        const display=transformFabricPoint(object,x-offset.x,y-offset.y);
+        const pdfPoint=mapPoint(display);
+        points.push(pdfPoint.x,pdfPoint.y);
     };
-    fc.getObjects().forEach(drawOne);
+    object.path.forEach(command=>{
+        const op=String(command[0]||'').toUpperCase();
+        if(op==='M'){
+            current={x:Number(command[1])||0,y:Number(command[2])||0};
+            start={...current};
+            add(current.x,current.y);
+        }else if(op==='L'){
+            current={x:Number(command[1])||0,y:Number(command[2])||0};
+            add(current.x,current.y);
+        }else if(op==='Q'){
+            const from={...current};
+            const control={x:Number(command[1])||0,y:Number(command[2])||0};
+            const to={x:Number(command[3])||0,y:Number(command[4])||0};
+            for(let step=1;step<=8;step++){
+                const t=step/8,one=1-t;
+                add((one*one*from.x)+(2*one*t*control.x)+(t*t*to.x),
+                    (one*one*from.y)+(2*one*t*control.y)+(t*t*to.y));
+            }
+            current=to;
+        }else if(op==='C'){
+            const from={...current};
+            const c1={x:Number(command[1])||0,y:Number(command[2])||0};
+            const c2={x:Number(command[3])||0,y:Number(command[4])||0};
+            const to={x:Number(command[5])||0,y:Number(command[6])||0};
+            for(let step=1;step<=12;step++){
+                const t=step/12,one=1-t;
+                add((one**3*from.x)+(3*one*one*t*c1.x)+(3*one*t*t*c2.x)+(t**3*to.x),
+                    (one**3*from.y)+(3*one*one*t*c1.y)+(3*one*t*t*c2.y)+(t**3*to.y));
+            }
+            current=to;
+        }else if(op==='Z'){
+            current={...start};
+            add(current.x,current.y);
+        }
+    });
+    return points.length>=4?points:[];
+}
+
+function cropCanvasToObjectBounds(canvas,fabricCanvas,object,rotation,multiplier=1){
+    if(!canvas||!object)return null;
+    const rot=normalizeRotationAngle(rotation);
+    const sourceWidth=(rot===90||rot===270)?canvas.height:canvas.width;
+    const sourceHeight=(rot===90||rot===270)?canvas.width:canvas.height;
+    const raw=object.getBoundingRect(true,true);
+    const stroke=Math.max(1,Number(getNativeStrokeSource(object,fabricObjectNativeKind(object)).strokeWidth)||1);
+    const padding=Math.max(6,stroke*multiplier*2);
+    const unrotated={
+        x:(raw.left*multiplier)-padding,
+        y:(raw.top*multiplier)-padding,
+        width:(raw.width*multiplier)+(padding*2),
+        height:(raw.height*multiplier)+(padding*2)
+    };
+    const bounds=window.EditorUtils.rotatePixelRect(unrotated,sourceWidth,sourceHeight,rot);
+    const minX=Math.max(0,Math.floor(bounds.x));
+    const minY=Math.max(0,Math.floor(bounds.y));
+    const maxX=Math.min(canvas.width,Math.ceil(bounds.x+bounds.width));
+    const maxY=Math.min(canvas.height,Math.ceil(bounds.y+bounds.height));
+    if(maxX<=minX||maxY<=minY)return null;
+    const cropped=document.createElement('canvas');
+    cropped.width=maxX-minX;
+    cropped.height=maxY-minY;
+    cropped.getContext('2d').drawImage(canvas,minX,minY,cropped.width,cropped.height,0,0,cropped.width,cropped.height);
+    return {canvas:cropped,x:minX,y:minY,sourceWidth:canvas.width,sourceHeight:canvas.height};
+}
+
+function renderNativeObjectAppearance(canvas,object,rotation){
+    const objects=canvas.getObjects();
+    const visibility=objects.map(item=>item.visible!==false);
+    const active=canvas.getActiveObject();
+    canvas.discardActiveObject();
+    objects.forEach(item=>{item.visible=item===object;});
+    canvas.renderAll();
+    try{
+        const normalized=buildNormalizedOverlayCanvas(canvas,rotation,SAVE_OVERLAY_SCALE);
+        return cropCanvasToObjectBounds(normalized,canvas,object,rotation,SAVE_OVERLAY_SCALE);
+    }finally{
+        objects.forEach((item,index)=>{item.visible=visibility[index];});
+        if(active&&objects.includes(active))canvas.setActiveObject(active);
+        canvas.renderAll();
+    }
+}
+
+async function createNativeAnnotationDescriptors(baseDoc){
+    const descriptors=[];
+    const containers=Array.from(document.querySelectorAll('.pdf-page-container'))
+        .sort((a,b)=>parseInt(a.dataset.pageNum,10)-parseInt(b.dataset.pageNum,10));
+    for(let containerIndex=0;containerIndex<containers.length;containerIndex++){
+        const pageNumber=parseInt(containers[containerIndex].dataset.pageNum,10);
+        const canvas=fabricCanvases.get(pageNumber);
+        if(!canvas||!canvas.getObjects().length)continue;
+        const page=baseDoc.getPage(pageNumber-1);
+        const jsPage=await pdfDoc.getPage(pageNumber);
+        const view=jsPage.view||[0,0,page.getWidth(),page.getHeight()];
+        const box={x:view[0],y:view[1],w:view[2]-view[0],h:view[3]-view[1]};
+        const rotation=normalizeRotationAngle(jsPage.rotate);
+        const savedVpt=canvas.viewportTransform.slice();
+        const savedWidth=canvas.getWidth(),savedHeight=canvas.getHeight();
+        const currentVptRatio=baseScale/(canvas._renderFitScale||(baseScale/zoomFactor));
+        canvas.setViewportTransform([1,0,0,1,0,0]);
+        setFabricCanvasDimensions(canvas,savedWidth/currentVptRatio,savedHeight/currentVptRatio);
+        try{
+            const pixelWidth=canvas.getWidth(),pixelHeight=canvas.getHeight();
+            const mapPoint=point=>mapDisplayPointToPdf(point,rotation,pixelWidth,pixelHeight,box.x,box.y,box.w,box.h);
+            for(const object of canvas.getObjects()){
+                if(!object||object.visible===false)continue;
+                const appearance=renderNativeObjectAppearance(canvas,object,rotation);
+                if(!appearance)continue;
+                const rect=[
+                    box.x+(appearance.x/appearance.sourceWidth)*box.w,
+                    box.y+(1-((appearance.y+appearance.canvas.height)/appearance.sourceHeight))*box.h,
+                    box.x+((appearance.x+appearance.canvas.width)/appearance.sourceWidth)*box.w,
+                    box.y+(1-(appearance.y/appearance.sourceHeight))*box.h
+                ];
+                const kind=fabricObjectNativeKind(object);
+                const strokeSource=getNativeStrokeSource(object,kind);
+                const colorSource=isTextObject(object)?object.fill:(isHighlightLayerObject(object)?object._hlBaseColor:strokeSource.stroke||object.fill);
+                const nativeColor=parseCssColor(colorSource);
+                let fill=isHighlightAreaObject(object)
+                    ?parseCssColor(object._hlBaseColor||object.fill)
+                    :((supportsFillObject(object)&&object.fill&&object.fill!=='transparent')?parseCssColor(object.fill):null);
+                if(kind==='arrow'||kind==='doubleArrow')fill=nativeColor.slice();
+                const rotatedAxes=rotation===90||rotation===270;
+                const pointScale=((rotatedAxes?box.h:box.w)/pixelWidth+
+                    (rotatedAxes?box.w:box.h)/pixelHeight)/2;
+                const rawOpacity=Number(object.opacity);
+                const descriptor={
+                    id:ensureDraftAnnotationId(object),
+                    pageIndex:pageNumber-1,
+                    kind,
+                    rect,
+                    color:nativeColor,
+                    fillColor:fill,
+                    opacity:isHighlightLayerObject(object)?HIGHLIGHT_LAYER_ALPHA:
+                        (Number.isFinite(rawOpacity)?Math.max(0,Math.min(1,rawOpacity)):1),
+                    width:Math.max(0.1,(Number(strokeSource.strokeWidth)||1)*pointScale),
+                    contents:isTextObject(object)?String(object.text||''):'',
+                    fontSize:isTextObject(object)?Math.max(1,(Number(object.fontSize)||12)*pointScale):undefined,
+                    alignment:isTextObject(object)?({left:0,center:1,right:2}[object.textAlign]||0):undefined,
+                    appearancePngBytes:canvasToPngBytes(appearance.canvas)
+                };
+                const line=getNativeLinePoints(object,kind,mapPoint);
+                if(line.length)descriptor.line=line;
+                if(kind==='ink'||kind==='highlightPen'){
+                    const ink=sampleNativeInkPath(object,mapPoint);
+                    if(ink.length)descriptor.inkLists=[ink];
+                }
+                descriptors.push(descriptor);
+            }
+        }finally{
+            setFabricCanvasDimensions(canvas,savedWidth,savedHeight);
+            canvas.setViewportTransform(savedVpt);
+            canvas.renderAll();
+        }
+    }
+    return descriptors;
 }
 
 // ─── SAVE PROGRESS OVERLAY ──────────────────────────
@@ -3954,7 +4209,7 @@ async function saveAllPagesAsPDF(){
     updateSaveProgress(0,'Preparing annotations...');
     await yieldToUI();
     try{
-        // Commit in-progress text edits before flattening to image.
+        // Commit in-progress text edits before serializing native annotations.
         fabricCanvases.forEach(c=>{
             const a=c.getActiveObject();
             if(a&&a.isEditing&&a.exitEditing){a.exitEditing();c.discardActiveObject();c.renderAll();}
@@ -3962,92 +4217,33 @@ async function saveAllPagesAsPDF(){
         syncPendingTextEdits();
 
         updateSaveProgress(3,'Preparing all annotated pages...');
-        const editableAnnotationPackage=await createAnnotationPackage();
+        await materializePendingAnnotations();
 
         updateSaveProgress(5,'Loading PDF document...');
         await yieldToUI();
-        const {PDFDocument,StandardFonts,rgb,degrees}=window.PDFLib;
+        const {PDFDocument}=window.PDFLib;
         let baseDoc;
         try{baseDoc=await PDFDocument.load(originalPdfBytes);}
         catch(e){baseDoc=await PDFDocument.load(originalPdfBytes,{ignoreEncryption:true});}
 
-        updateSaveProgress(12,'Embedding fonts...');
+        updateSaveProgress(12,'Building native PDF annotations...');
         await yieldToUI();
-        const helv=await baseDoc.embedFont(StandardFonts.Helvetica);
-        const helvBold=await baseDoc.embedFont(StandardFonts.HelveticaBold);
-        const timesRoman=await baseDoc.embedFont(StandardFonts.TimesRoman);
-        const timesBold=await baseDoc.embedFont(StandardFonts.TimesRomanBold);
-        const courier=await baseDoc.embedFont(StandardFonts.Courier);
-        const courierBold=await baseDoc.embedFont(StandardFonts.CourierBold);
-        function pickFont(fontFamily,fontWeight){
-            const wNum=parseInt(fontWeight,10);
-            const isBold=(typeof fontWeight==='string'&&/bold/i.test(fontWeight))||(!Number.isNaN(wNum)&&wNum>=600);
-            if(fontFamily==='serif')return isBold?timesBold:timesRoman;
-            if(fontFamily==='monospace')return isBold?courierBold:courier;
-            return isBold?helvBold:helv;
-        }
+        const nativeDescriptors=await createNativeAnnotationDescriptors(baseDoc);
+        const editableAnnotationPackage=await createAnnotationPackage(nativeDescriptors);
 
-        updateSaveProgress(20,'Processing pages...');
+        updateSaveProgress(72,'Writing standard PDF annotations...');
         await yieldToUI();
-        const conts=Array.from(document.querySelectorAll('.pdf-page-container')).sort((a,b)=>parseInt(a.dataset.pageNum)-parseInt(b.dataset.pageNum));
-        const totalPages=conts.length;
+        await window.NativeAnnotationUtils.replaceDraftNativeAnnotations(
+            baseDoc,window.PDFLib,nativeDescriptors);
 
-        let stampedPages=0;
-        for(let ci=0;ci<conts.length;ci++){
-            const ct=conts[ci];
-            const pn=parseInt(ct.dataset.pageNum,10),fc=fabricCanvases.get(pn);
-            const pageProgress=20+((ci/totalPages)*65);
-            updateSaveProgress(pageProgress,`Stamping page ${pn}...`,`Page ${ci+1} of ${totalPages}`);
-            await yieldToUI();
-            if(!fc)continue;
-            if(fc.getObjects().length===0)continue;
-
-            // Temporarily reset zoom viewport transform so export uses base coordinates
-            const savedVpt=fc.viewportTransform.slice();
-            const savedW=fc.getWidth(),savedH=fc.getHeight();
-            const currentVptRatio=baseScale/(fc._renderFitScale||(baseScale/zoomFactor));
-            fc.setViewportTransform([1,0,0,1,0,0]);
-            setFabricCanvasDimensions(fc,savedW/currentVptRatio,savedH/currentVptRatio);
-            try{
-            const page=baseDoc.getPage(pn-1);
-            const jsPage=await pdfDoc.getPage(pn);
-            const view=jsPage.view||[0,0,page.getWidth(),page.getHeight()];
-            const boxX=view[0];
-            const boxY=view[1];
-            const boxW=view[2]-view[0];
-            const boxH=view[3]-view[1];
-            const rot=normalizeRotationAngle(jsPage.rotate);
-            const overlayCanvas=buildNormalizedOverlayCanvas(fc,rot,SAVE_OVERLAY_SCALE,false);
-            const croppedOverlay=cropCanvasToAnnotationBounds(overlayCanvas,fc,rot,SAVE_OVERLAY_SCALE);
-            if(croppedOverlay){
-                const pngBytes=canvasToPngBytes(croppedOverlay.canvas);
-                if(pngBytes.length){
-                    const overlay=await baseDoc.embedPng(pngBytes);
-                    const drawX=boxX+(croppedOverlay.x/croppedOverlay.sourceWidth)*boxW;
-                    const drawY=boxY+(1-((croppedOverlay.y+croppedOverlay.canvas.height)/croppedOverlay.sourceHeight))*boxH;
-                    page.drawImage(overlay,{
-                        x:drawX,
-                        y:drawY,
-                        width:(croppedOverlay.canvas.width/croppedOverlay.sourceWidth)*boxW,
-                        height:(croppedOverlay.canvas.height/croppedOverlay.sourceHeight)*boxH
-                    });
-                }
-            }
-            drawTextObjectsAsVector(fc,page,rot,{x:boxX,y:boxY,w:boxW,h:boxH},{degrees,rgb,pickFont});
-            stampedPages++;
-            }finally{
-            // Restore zoom viewport transform
-            setFabricCanvasDimensions(fc,savedW,savedH);
-            fc.setViewportTransform(savedVpt);
-            }
-        }
-
-        if(editableAnnotationPackage.pages.length){
-            updateSaveProgress(86,'Embedding editable annotations...');
-            await yieldToUI();
-            await window.EmbeddedAnnotationUtils.embedStateIntoPdf(
-                baseDoc,originalPdfBytes,editableAnnotationPackage);
-        }
+        updateSaveProgress(84,'Embedding DraftAnnotator edit metadata...');
+        await yieldToUI();
+        window.NativeAnnotationUtils.removeEmbeddedFilesByName(baseDoc,window.PDFLib,[
+            window.EmbeddedAnnotationUtils.NATIVE_ANNOTATIONS_NAME,
+            window.EmbeddedAnnotationUtils.ANNOTATIONS_NAME,
+            window.EmbeddedAnnotationUtils.SOURCE_PDF_NAME
+        ]);
+        await window.EmbeddedAnnotationUtils.embedNativeStateIntoPdf(baseDoc,editableAnnotationPackage);
 
         updateSaveProgress(88,'Compiling final PDF...');
         await yieldToUI();
@@ -4078,7 +4274,9 @@ async function saveAllPagesAsPDF(){
         recomputeUnsavedChanges();
         syncSizeControl();
 
-        updateSaveProgress(100,stampedPages>0?(isDraftReviewMode()?'Draft saved successfully!':'PDF saved successfully!'):'Saved (no annotations found)','');
+        updateSaveProgress(100,nativeDescriptors.length>0
+            ?(isDraftReviewMode()?'Draft saved with editable PDF annotations!':'PDF saved with editable annotations!')
+            :'Saved (no annotations found)','');
         await yieldToUI();
         setTimeout(hideSaveOverlay,1200);
     }catch(err){
@@ -5100,9 +5298,9 @@ updateZoomDisplay();
 const pendingSettingsMessages=[pendingShortcutResetNotice,pendingEditorSettingsResetNotice,pendingToolbarStateResetNotice].filter(Boolean);
 if(pendingSettingsMessages.length)showMsg(pendingSettingsMessages.join(' '));
 
-if(!window.PDFLib){
-    console.error('PDFLib failed to load');
-    showMsg('Save disabled: pdf-lib missing');
+if(!window.PDFLib||!window.NativeAnnotationUtils||!window.EmbeddedAnnotationUtils){
+    console.error('PDF save libraries failed to load');
+    showMsg('Save disabled: PDF annotation library missing');
     btnSavePdf.disabled=true;
 }
 
@@ -5113,6 +5311,7 @@ if(!window.PDFLib){
     if(!window.fabric) missing.push('fabric.js');
     if(!window.PDFLib) missing.push('pdf-lib');
     if(!window.EmbeddedAnnotationUtils) missing.push('embedded-annotation-utils.js');
+    if(!window.NativeAnnotationUtils) missing.push('native-annotation-utils.js');
     if(!window.EditorUtils) missing.push('editor-utils.js');
     if(missing.length>0){
         const msg=document.getElementById('initialMessage');
@@ -5212,6 +5411,7 @@ function applyDraftAnnotationsToCanvas(canvas,pageNumber,fabricJson,onDone){
             },(o,obj)=>{
                 if(o.annotationType)obj.annotationType=o.annotationType;
                 if(o._hlBaseColor)obj._hlBaseColor=o._hlBaseColor;
+                if(o.draftAnnotationId)obj.draftAnnotationId=o.draftAnnotationId;
             }).catch(error=>{
                 canvas._restoring=false;
                 reject(error);
@@ -5388,7 +5588,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-08-26 10:36 PDT';
+        const built='2026-08-26 11:38 PDT';
         bd.textContent='Built '+built;
     }
 }

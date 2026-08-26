@@ -15,6 +15,7 @@ const attachments = {
 };
 
 const restored = utils.readStateFromAttachments(attachments);
+assert.equal(restored.mode, 'legacy');
 assert.deepEqual(restored.payload, payload);
 assert.deepEqual(restored.sourcePdfBytes, sourcePdfBytes);
 assert.notEqual(restored.sourcePdfBytes, sourcePdfBytes, 'source bytes should be copied');
@@ -62,6 +63,18 @@ assert.throws(
     const roundTrip=utils.readStateFromAttachments(roundTripAttachments);
     assert.deepEqual(roundTrip.payload,payload);
     assert.deepEqual(roundTrip.sourcePdfBytes,sourcePdfBytes);
+
+    calls.length=0;
+    const nativeSize=await utils.embedNativeStateIntoPdf(fakePdfDocument,payload);
+    assert.equal(calls.length,1);
+    assert.equal(calls[0][1],utils.NATIVE_ANNOTATIONS_NAME);
+    assert.equal(nativeSize,calls[0][0].length);
+    const nativeRoundTrip=utils.readStateFromAttachments({
+        native:{filename:calls[0][1],content:calls[0][0]}
+    });
+    assert.equal(nativeRoundTrip.mode,'native');
+    assert.equal(nativeRoundTrip.sourcePdfBytes,null);
+    assert.deepEqual(nativeRoundTrip.payload,payload);
     console.log('embedded annotation utility tests passed');
 })().catch(error=>{
     console.error(error);

@@ -17,7 +17,8 @@ const settings = html.slice(settingsStart, settingsEnd);
 
 assert.doesNotMatch(sidebar, /Annotation Layers|enableEditableLayers|Editable Annotation File/);
 assert.doesNotMatch(settings, /enableEditableLayers|Editable Annotation File|\.draftanno/);
-assert.match(settings, /Saved PDFs keep DraftAnnotator markup editable/);
-assert.match(settings, /no separate layer file is required/);
+assert.match(settings, /Saved markup uses standard PDF annotations/);
+assert.match(settings, /Acrobat, Bluebeam, and Foxit/);
+assert.match(settings, /No separate layer file is required/);
 
 console.log('settings layout tests passed');
