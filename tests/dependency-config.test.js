@@ -13,6 +13,7 @@ assert.match(html, /Content-Security-Policy/);
 assert.match(app, /isEvalSupported:false/);
 assert.match(app, /pdf\.worker\.min\.js/);
 assert.match(app, /if\(!window\.EditorUtils\)/);
+assert.match(html, /embedded-annotation-utils\.js\?v=[^"']+/);
 assert.match(html, /editor-utils\.js\?v=[^"']+/);
 assert.match(html, /material-analyzer\.js\?v=[^"']+/);
 assert.match(html, /app\.js\?v=[^"']+/);

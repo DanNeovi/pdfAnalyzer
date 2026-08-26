@@ -144,17 +144,10 @@ const specialStudGaugeSummary=document.getElementById('specialStudGaugeSummary')
 const specialStudRowCount=document.getElementById('specialStudRowCount');
 const specialStudRows=document.getElementById('specialStudRows');
 const btnExportSpecialStudCsv=document.getElementById('btnExportSpecialStudCsv');
-const btnExportAnnotations=document.getElementById('btnExportAnnotations');
-const btnImportAnnotations=document.getElementById('btnImportAnnotations');
-const btnCopyPageAnnotations=document.getElementById('btnCopyPageAnnotations');
-const btnMovePageAnnotations=document.getElementById('btnMovePageAnnotations');
-const annotationTargetPage=document.getElementById('annotationTargetPage');
-const annotationImportInput=document.getElementById('annotationImportInput');
-const enableEditableLayers=document.getElementById('enableEditableLayers');
-const editableLayerControls=document.getElementById('editableLayerControls');
 const fabricCanvases=new Map();
 
 const savedStateByPage=new Map();
+const pendingEmbeddedPageAnnotations=new Map();
 const historyStack=[];
 let historyPointer=-1;
 const CLIPBOARD_OBJECT_PROPS=['annotationType','_hlBaseColor'];
@@ -1242,8 +1235,9 @@ function saveCanvasState(c){
     recomputeUnsavedChanges();
 }
 
-// Portable annotation layers. The PDF is deliberately not included: the
-// compressed sidecar contains only editable Fabric objects and page geometry.
+// DraftAnnotator stores this validated Fabric package inside each saved PDF.
+// The clean source PDF is embedded alongside it so reopening can render the
+// unmarked pages and restore every annotation as an editable object.
 const ANNOTATION_FORMAT='draftannotator.annotations';
 const ANNOTATION_FORMAT_VERSION=1;
 
@@ -1252,13 +1246,16 @@ function annotationPageSize(canvas){
     return {width:canvas.width/(vpt[0]||1),height:canvas.height/(vpt[3]||1)};
 }
 
-async function materializePendingDraftAnnotations(){
-    const pendingPages=Array.from(pendingDraftPageAnnotations.keys()).sort((a,b)=>a-b);
+async function materializePendingAnnotations(){
+    const pendingPages=Array.from(new Set([
+        ...pendingDraftPageAnnotations.keys(),
+        ...pendingEmbeddedPageAnnotations.keys()
+    ])).sort((a,b)=>a-b);
     for(const pageNumber of pendingPages)await ensureAnnotationPageRendered(pageNumber);
 }
 
 async function createAnnotationPackage(){
-    await materializePendingDraftAnnotations();
+    await materializePendingAnnotations();
     const pages=[];
     fabricCanvases.forEach((canvas,pageNumber)=>{
         const size=annotationPageSize(canvas);
@@ -1275,40 +1272,35 @@ async function createAnnotationPackage(){
     };
 }
 
-async function gzipBytes(bytes){
-    if(typeof CompressionStream!=='function')return null;
-    const stream=new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
-    return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-async function gunzipBytes(bytes){
-    if(typeof DecompressionStream!=='function')throw new Error('This browser cannot open compressed annotation layers.');
-    const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-    return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-async function exportEditableAnnotations(){
-    if(!pdfDoc)return;
-    const payload=await createAnnotationPackage();
-    const raw=new TextEncoder().encode(JSON.stringify(payload));
-    const compressed=await gzipBytes(raw);
-    const data=compressed||raw;
-    const base=(currentFileName||'document').replace(/\.pdf$/i,'');
-    const extension=compressed?'draftanno':'annotations.json';
-    const blob=new Blob([data],{type:compressed?'application/gzip':'application/json'});
-    const link=document.createElement('a');
-    link.href=URL.createObjectURL(blob);link.download=`${base}.${extension}`;link.click();
-    setTimeout(()=>URL.revokeObjectURL(link.href),60000);
-    showMsg(`Editable layer exported (${Math.max(1,Math.round(data.length/1024))} KB)`);
-}
-
 function ensureAnnotationPackage(value){
     if(!value||value.format!==ANNOTATION_FORMAT||value.version!==ANNOTATION_FORMAT_VERSION||!Array.isArray(value.pages)){
-        throw new Error('Unsupported or invalid annotation layer file.');
+        throw new Error('Unsupported or invalid embedded annotation data.');
     }
-    if(value.pages.length>10000)throw new Error('Annotation layer contains too many pages.');
-    value.pages.forEach(page=>validatePortableFabricJson(page&&page.fabric));
+    if(value.pages.length>10000)throw new Error('Embedded annotation data contains too many pages.');
+    const seenPages=new Set();
+    const sourcePageCount=Number(value.source&&value.source.pageCount);
+    value.pages.forEach(page=>{
+        const pageNumber=Number(page&&page.pageNumber);
+        const width=Number(page&&page.width),height=Number(page&&page.height);
+        if(!Number.isInteger(pageNumber)||pageNumber<1)throw new Error('Annotation page number is invalid.');
+        if(seenPages.has(pageNumber))throw new Error(`Annotation page ${pageNumber} is duplicated.`);
+        if(Number.isInteger(sourcePageCount)&&sourcePageCount>0&&pageNumber>sourcePageCount){
+            throw new Error(`Annotation page ${pageNumber} is outside the source PDF.`);
+        }
+        seenPages.add(pageNumber);
+        if(!Number.isFinite(width)||width<=0||!Number.isFinite(height)||height<=0){
+            throw new Error(`Annotation page ${pageNumber} has invalid dimensions.`);
+        }
+        validatePortableFabricJson(page.fabric);
+    });
     return value;
+}
+
+async function readEmbeddedAnnotationState(pdfProxy){
+    if(!pdfProxy||typeof pdfProxy.getAttachments!=='function')return null;
+    const attachments=await pdfProxy.getAttachments();
+    const state=window.EmbeddedAnnotationUtils.readStateFromAttachments(attachments);
+    return state?{sourcePdfBytes:state.sourcePdfBytes,payload:ensureAnnotationPackage(state.payload)}:null;
 }
 
 const PORTABLE_FABRIC_TYPES=new Set([
@@ -1321,7 +1313,7 @@ function validatePortableFabricJson(fabricJson){
     const visit=(object,depth=0)=>{
         if(!object||typeof object!=='object'||depth>12)throw new Error('Annotation object structure is invalid.');
         objectCount+=1;
-        if(objectCount>10000)throw new Error('Annotation layer contains too many objects.');
+        if(objectCount>10000)throw new Error('Embedded annotation data contains too many objects.');
         const type=String(object.type||'').toLowerCase();
         if(!PORTABLE_FABRIC_TYPES.has(type))throw new Error(`Unsupported annotation object type: ${type||'unknown'}.`);
         if(type==='image'){
@@ -1365,65 +1357,57 @@ async function enlivenFabricObjects(objects){
     return enlivened||[];
 }
 
-async function addPortableObjects(targetCanvas,fabricJson,sourceWidth,sourceHeight){
-    validatePortableFabricJson(fabricJson);
-    const objects=await enlivenFabricObjects(fabricJson&&fabricJson.objects);
+async function restoreEmbeddedPageAnnotations(targetCanvas,pageData){
+    validatePortableFabricJson(pageData&&pageData.fabric);
+    const objects=await enlivenFabricObjects(pageData.fabric.objects);
     const target=annotationPageSize(targetCanvas);
     const {scale:scaleFactor,offsetX,offsetY}=window.EditorUtils.getContainTransform(
-        sourceWidth,sourceHeight,target.width,target.height);
+        Number(pageData.width),Number(pageData.height),target.width,target.height);
+    targetCanvas._restoring=true;
     targetCanvas._suppressHistory=true;
-    objects.forEach(object=>{
-        object.set({
-            left:offsetX+((Number(object.left)||0)*scaleFactor),
-            top:offsetY+((Number(object.top)||0)*scaleFactor),
-            scaleX:(Number(object.scaleX)||1)*scaleFactor,
-            scaleY:(Number(object.scaleY)||1)*scaleFactor
+    try{
+        targetCanvas.getObjects().slice().forEach(object=>targetCanvas.remove(object));
+        objects.forEach(object=>{
+            object.set({
+                left:offsetX+((Number(object.left)||0)*scaleFactor),
+                top:offsetY+((Number(object.top)||0)*scaleFactor),
+                scaleX:(Number(object.scaleX)||1)*scaleFactor,
+                scaleY:(Number(object.scaleY)||1)*scaleFactor
+            });
+            if(isHighlightLayerObject(object)){
+                normalizeHighlightVisual(object);
+                applyHighlightSelectability(object,activeTool==='select');
+            }else{
+                object.selectable=activeTool==='select';
+                object.evented=activeTool==='select';
+            }
+            if(isTextObject(object))configureTextObjectRendering(object);
+            targetCanvas.add(object);
         });
-        if(isHighlightLayerObject(object)){normalizeHighlightVisual(object);applyHighlightSelectability(object,activeTool==='select');}
-        if(isTextObject(object))configureTextObjectRendering(object);
-        targetCanvas.add(object);
-    });
-    targetCanvas._suppressHistory=false;
+    }finally{
+        targetCanvas._suppressHistory=false;
+        targetCanvas._restoring=false;
+    }
     targetCanvas.requestRenderAll();
-    saveCanvasState(targetCanvas);
+    const state=getSerializedCanvasState(targetCanvas);
+    targetCanvas._lastSavedState=state;
+    targetCanvas._historySeeded=false;
+    savedStateByPage.set(targetCanvas._pageNum,state);
     return objects.length;
 }
 
-async function importEditableAnnotations(file){
-    if(!pdfDoc)throw new Error('Load the destination PDF first.');
-    if(file.size>100*1024*1024)throw new Error('Annotation layer is too large (100 MB maximum).');
-    let bytes=new Uint8Array(await file.arrayBuffer());
-    const isGzip=(bytes[0]===0x1f&&bytes[1]===0x8b)||/\.(gz|draftanno)$/i.test(file.name);
-    if(isGzip)bytes=await gunzipBytes(bytes);
-    const payload=ensureAnnotationPackage(JSON.parse(new TextDecoder().decode(bytes)));
-    let imported=0,skipped=0;
+async function hydrateEmbeddedAnnotations(payload){
+    let restored=0;
     for(const pageData of payload.pages){
         const pageNumber=Number(pageData.pageNumber);
-        if(pageNumber<1||pageNumber>numPages){skipped++;continue;}
-        const canvas=await ensureAnnotationPageRendered(pageNumber);
-        imported+=await addPortableObjects(canvas,pageData.fabric,Number(pageData.width),Number(pageData.height));
+        if(pageNumber<1||pageNumber>numPages)continue;
+        restored+=pageData.fabric.objects.length;
+        const canvas=fabricCanvases.get(pageNumber);
+        if(canvas)await restoreEmbeddedPageAnnotations(canvas,pageData);
+        else pendingEmbeddedPageAnnotations.set(pageNumber,pageData);
     }
-    showMsg(`Imported ${imported} annotation(s)${skipped?`; skipped ${skipped} unavailable page(s)`:''}`);
-}
-
-async function transferCurrentPageAnnotations(move=false){
-    if(!pdfDoc)return;
-    const sourcePage=activeContextPageNum||currentVisiblePage;
-    const targetPage=Math.trunc(Number(annotationTargetPage&&annotationTargetPage.value));
-    if(!Number.isFinite(targetPage)||targetPage<1||targetPage>numPages)throw new Error(`Choose a target page from 1 to ${numPages}.`);
-    if(targetPage===sourcePage)throw new Error('Choose a different target page.');
-    const source=await ensureAnnotationPageRendered(sourcePage);
-    const target=await ensureAnnotationPageRendered(targetPage);
-    const sourceSize=annotationPageSize(source);
-    const json=source.toJSON(['annotationType','selectable','evented','_hlBaseColor']);
-    const count=await addPortableObjects(target,json,sourceSize.width,sourceSize.height);
-    if(move&&count){
-        source._suppressHistory=true;
-        source.getObjects().slice().forEach(object=>source.remove(object));
-        source._suppressHistory=false;source.requestRenderAll();saveCanvasState(source);
-    }
-    goToPage(targetPage);
-    showMsg(`${move?'Moved':'Copied'} ${count} annotation(s) to page ${targetPage}`);
+    recomputeUnsavedChanges();
+    return restored;
 }
 
 function undo(){
@@ -3417,6 +3401,11 @@ async function renderPage(n,containerOverride=null){
         }
         fc.defaultCursor=getCursorForTool(activeTool);
         fc.calcOffset();
+        const pendingEmbeddedPage=pendingEmbeddedPageAnnotations.get(n);
+        if(pendingEmbeddedPage){
+            pendingEmbeddedPageAnnotations.delete(n);
+            await restoreEmbeddedPageAnnotations(fc,pendingEmbeddedPage);
+        }
         const pendingDraftJson=pendingDraftPageAnnotations.get(n);
         if(pendingDraftJson){
             pendingDraftPageAnnotations.delete(n);
@@ -3451,6 +3440,7 @@ async function renderAllPages(){
     pageViewportCache.clear();
     pageTextContentCache=new WeakMap();
     searchTextByPage.clear();
+    pendingEmbeddedPageAnnotations.clear();
     pendingDraftPageAnnotations.clear();
     savedStateByPage.clear();historyStack.length=0;historyPointer=-1;historyTotalBytes=0;historyRestoreInProgress=false;hasPendingTextEdits=false;hasUnsavedChanges=false;
     isPanning=false;panOffsetX=0;panOffsetY=0;pdfViewer.style.transform='translate(0,0)';
@@ -3606,21 +3596,6 @@ function exportSpecialStudCsv(){
 }
 
 if(btnExportSpecialStudCsv)btnExportSpecialStudCsv.addEventListener('click',exportSpecialStudCsv);
-if(btnExportAnnotations)btnExportAnnotations.addEventListener('click',()=>exportEditableAnnotations().catch(error=>showMsg(`Export failed: ${error.message}`)));
-if(btnImportAnnotations)btnImportAnnotations.addEventListener('click',()=>annotationImportInput&&annotationImportInput.click());
-if(annotationImportInput)annotationImportInput.addEventListener('change',async()=>{
-    const file=annotationImportInput.files&&annotationImportInput.files[0];
-    annotationImportInput.value='';
-    if(!file)return;
-    try{await importEditableAnnotations(file);}catch(error){console.error('Annotation import failed:',error);showMsg(`Import failed: ${error.message}`);}
-});
-if(btnCopyPageAnnotations)btnCopyPageAnnotations.addEventListener('click',()=>transferCurrentPageAnnotations(false).catch(error=>showMsg(error.message)));
-if(btnMovePageAnnotations)btnMovePageAnnotations.addEventListener('click',()=>transferCurrentPageAnnotations(true).catch(error=>showMsg(error.message)));
-if(enableEditableLayers)enableEditableLayers.addEventListener('change',()=>{
-    if(editableLayerControls)editableLayerControls.hidden=!enableEditableLayers.checked;
-    const available=!!pdfDoc&&enableEditableLayers.checked;
-    [btnExportAnnotations,btnImportAnnotations,btnCopyPageAnnotations,btnMovePageAnnotations].forEach(button=>{if(button)button.disabled=!available;});
-});
 
 async function loadPDF(f){
     const ini=document.getElementById('initialMessage');
@@ -3642,25 +3617,48 @@ async function loadPDF(f){
         document.getElementById('fileNameDisplay').classList.remove('hidden');
         document.getElementById('fileNameDisplay').classList.add('flex');
         const ab=await f.arrayBuffer();
-        originalPdfBytes=new Uint8Array(ab);
+        const uploadedPdfBytes=new Uint8Array(ab);
+        originalPdfBytes=uploadedPdfBytes;
         // Pass a copy to pdf.js - it transfers the ArrayBuffer ownership,
         // which would detach originalPdfBytes and break pdf-lib on save.
         // isEvalSupported:false blocks the CVE-2024-4367 eval path (malicious
         // font matrices executing JS) on pdf.js builds older than 4.2.67.
         pdfDoc=await pdfjsLib.getDocument({data:originalPdfBytes.slice(),isEvalSupported:false}).promise;
+        let embeddedState=null;
+        let embeddedWarning='';
+        try{
+            embeddedState=await readEmbeddedAnnotationState(pdfDoc);
+            if(embeddedState){
+                const sourceProxy=await pdfjsLib.getDocument({data:embeddedState.sourcePdfBytes.slice(),isEvalSupported:false}).promise;
+                const expectedPages=Number(embeddedState.payload.source&&embeddedState.payload.source.pageCount);
+                if(Number.isInteger(expectedPages)&&expectedPages>0&&sourceProxy.numPages!==expectedPages){
+                    await sourceProxy.destroy();
+                    throw new Error('The embedded source PDF does not match its annotation data.');
+                }
+                const wrapperProxy=pdfDoc;
+                pdfDoc=sourceProxy;
+                originalPdfBytes=embeddedState.sourcePdfBytes;
+                try{await wrapperProxy.destroy();}catch(error){console.debug('PDF wrapper cleanup failed',error);}
+            }
+        }catch(error){
+            console.warn('Embedded DraftAnnotator data could not be restored:',error);
+            embeddedState=null;
+            originalPdfBytes=uploadedPdfBytes;
+            embeddedWarning=' Embedded editable data could not be restored.';
+        }
         numPages=pdfDoc.numPages;
-        if(annotationTargetPage){annotationTargetPage.max=String(numPages);annotationTargetPage.value=String(Math.min(2,numPages));}
-        const editableToolsEnabled=!!(enableEditableLayers&&enableEditableLayers.checked);
-        [btnExportAnnotations,btnImportAnnotations,btnCopyPageAnnotations,btnMovePageAnnotations].forEach(button=>{if(button)button.disabled=!editableToolsEnabled;});
         await renderAllPages();
+        const restoredCount=embeddedState?await hydrateEmbeddedAnnotations(embeddedState.payload):0;
         btnSavePdf.disabled=false;recomputeUnsavedChanges();
-        showMsg(`PDF loaded: ${numPages} page(s)`);
+        showMsg(embeddedState
+            ?`PDF loaded: ${restoredCount} editable annotation(s) restored`
+            :`PDF loaded: ${numPages} page(s).${embeddedWarning}`);
         scheduleSpecialStudAnalysis(pdfDoc);
     }catch(e){
         console.error('Load err:',e);
         await disposeAllFabricCanvases();
         fabricCanvases.clear();renderedPages.clear();renderingPages.clear();
-        savedStateByPage.clear();historyStack.length=0;historyPointer=-1;historyTotalBytes=0;
+        pendingEmbeddedPageAnnotations.clear();savedStateByPage.clear();historyStack.length=0;historyPointer=-1;historyTotalBytes=0;
         specialStudAnalysisRun+=1;
         resetSpecialStudAnalysis('Special stud scan unavailable because the PDF did not load.');
         const errDiv=document.createElement('div');errDiv.className='text-red-600 p-8';errDiv.textContent='Error: '+e.message;pdfViewer.innerHTML='';pdfViewer.appendChild(errDiv);
@@ -3964,7 +3962,7 @@ async function saveAllPagesAsPDF(){
         syncPendingTextEdits();
 
         updateSaveProgress(3,'Preparing all annotated pages...');
-        await materializePendingDraftAnnotations();
+        const editableAnnotationPackage=await createAnnotationPackage();
 
         updateSaveProgress(5,'Loading PDF document...');
         await yieldToUI();
@@ -4042,6 +4040,13 @@ async function saveAllPagesAsPDF(){
             setFabricCanvasDimensions(fc,savedW,savedH);
             fc.setViewportTransform(savedVpt);
             }
+        }
+
+        if(editableAnnotationPackage.pages.length){
+            updateSaveProgress(86,'Embedding editable annotations...');
+            await yieldToUI();
+            await window.EmbeddedAnnotationUtils.embedStateIntoPdf(
+                baseDoc,originalPdfBytes,editableAnnotationPackage);
         }
 
         updateSaveProgress(88,'Compiling final PDF...');
@@ -5107,6 +5112,7 @@ if(!window.PDFLib){
     if(!window.pdfjsLib) missing.push('pdf.js');
     if(!window.fabric) missing.push('fabric.js');
     if(!window.PDFLib) missing.push('pdf-lib');
+    if(!window.EmbeddedAnnotationUtils) missing.push('embedded-annotation-utils.js');
     if(!window.EditorUtils) missing.push('editor-utils.js');
     if(missing.length>0){
         const msg=document.getElementById('initialMessage');
@@ -5382,7 +5388,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-08-25 16:02 PDT';
+        const built='2026-08-26 10:36 PDT';
         bd.textContent='Built '+built;
     }
 }

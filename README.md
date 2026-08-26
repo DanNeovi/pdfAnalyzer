@@ -9,34 +9,25 @@ Browser-based PDF markup tool for redlining drawings and documents. The app UI i
 - Automatically find 16, 14, and 12 gauge special stud/track cut-list rows (excluding flat straps), summarize quantities/weights, and export separated/combined CSV sections
 - Undo, redo, zoom, and navigate pages
 - Save the annotated result back out as a PDF
-- Export/import a compact compressed editable annotation layer (`.draftanno`)
-- Copy or move a page's annotations to another page with automatic size remapping
+- Preserve editable annotations automatically inside the saved PDF
 - Customize keyboard shortcuts and editor limits in Settings
 - Persist shortcut and toolbar preferences in browser storage
 - Paste Windows screenshots and other clipboard images directly onto the current PDF page
 
-## Editable annotation layers
+## Editable annotations in saved PDFs
 
-Editable layer tools are disabled by default and create no extra file. Enable them
-for the current session only when markup needs to be transferred or preserved.
-`Export Layer` saves only the Fabric annotation objects and page geometry; it never
-duplicates the source PDF. Modern browsers gzip the JSON into a `.draftanno` file.
-Load the destination or revised PDF first, then use `Import Layer`. Pages are matched
-by page number and coordinates are scaled to the destination page dimensions.
+Saving produces one self-contained PDF. The visible annotation appearance is added
+to the pages for compatibility with ordinary PDF viewers, while DraftAnnotator also
+embeds the clean source PDF and the validated Fabric object package in the same file.
+When that PDF is reopened in DraftAnnotator, the clean pages and editable objects are
+restored automatically, so annotations can be moved, changed, or deleted without a
+separate sidecar file.
 
-`Copy Page` and `Move Page` transfer every annotation on the active page to the
-chosen target page. Move removes the source objects only after the target copy has
-been created successfully.
-
-PDF export remains a flattened delivery format. To limit growth, ordinary text is
-written as vector PDF text, graphical overlays are rendered at 2x and cropped to
-their painted bounds, and PDF object streams are enabled. Keep the `.draftanno`
-sidecar when future editing or transfer to a revised PDF is required.
-
-Transfers use uniform contain scaling so text, circles, images, and arrowheads are
-not stretched when page aspect ratios differ. Imported layer data is type-checked,
-object/depth limited, and restricted to embedded raster images. Inserted images are
-limited to 20 MB and downscaled to a maximum 2048-pixel dimension before storage.
+The embedded annotation package is type-checked, object/depth limited, and restricted
+to embedded raster images. Inserted images are limited to 20 MB and downscaled to a
+maximum 2048-pixel dimension before storage. Ordinary text is written as vector PDF
+text, graphical overlays are rendered at 2x and cropped to their painted bounds, and
+PDF object streams are enabled for the universally visible page appearance.
 
 Draft review saves materialize lazy annotated pages before export and serialize
 autosaves per page to prevent stale requests from overwriting newer edits. Text
@@ -63,6 +54,7 @@ Opening the HTML file directly may work in some browsers, but a local server is 
 
 - `pdf-annotator.html`: main UI and static markup
 - `app.js`: application logic for PDF rendering, annotation tools, shortcuts, settings, and export
+- `embedded-annotation-utils.js`: embedded PDF attachment encode/decode helpers
 - `material-analyzer.js`: PDF text-row parsing and summaries for special studs
 - `tailwind.css`: pre-built, committed Tailwind stylesheet served locally (no runtime CDN)
 - `tailwind.config.js` + `src/tailwind.input.css`: source for regenerating `tailwind.css`
