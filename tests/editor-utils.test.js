@@ -48,6 +48,25 @@ assert.deepEqual(
     {left:65,top:265,scaleX:1,scaleY:0.75}
 );
 
+assert.deepEqual(utils.getPageTextReplacementPlacement({
+    layerWidth:1800,
+    layerHeight:2400,
+    sceneWidth:900,
+    sceneHeight:1200,
+    offsetLeft:200,
+    offsetTop:300,
+    offsetWidth:400,
+    transformScaleX:1.2,
+    fontSize:24,
+    angle:90
+}), {
+    left:100,
+    top:150,
+    width:240,
+    fontSize:12,
+    angle:90
+});
+
 const screenshotBlob={type:'image/png',size:1234};
 assert.equal(utils.getClipboardImageBlob({
     items:[{kind:'file',type:'image/png',getAsFile:()=>screenshotBlob}],

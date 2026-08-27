@@ -44,7 +44,7 @@ const onePixelPng = Uint8Array.from(Buffer.from(
         kind,
         rect: [40 + index * 3, 60 + index * 3, 150 + index * 3, 120 + index * 3],
         color: [1, 0, 0],
-        fillColor: kind.includes('highlight') ? [1, 1, 0] : null,
+        fillColor: kind === 'freeText' ? [1, 1, 1] : (kind.includes('highlight') ? [1, 1, 0] : null),
         opacity: kind.includes('highlight') ? 0.35 : 1,
         width: 2,
         contents: kind === 'freeText' ? 'Editable text' : '',
@@ -63,6 +63,8 @@ const onePixelPng = Uint8Array.from(Buffer.from(
     const restored = nativeUtils.readDraftNativeAnnotations(reopened, pdfLib);
     assert.equal(restored.length, kinds.length);
     assert.deepEqual(restored.map(item => item.kind), kinds);
+    assert.deepEqual(restored.find(item => item.kind === 'freeText').fillColor, [1, 1, 1],
+        'replacement text must retain its opaque FreeText background');
     const reopenedAnnots = reopened.getPage(0).node.lookup(pdfLib.PDFName.of('Annots'), pdfLib.PDFArray);
     const editedFreeText = reopenedAnnots.lookup(1, pdfLib.PDFDict);
     editedFreeText.set(pdfLib.PDFName.of('Rect'), reopened.context.obj([200, 210, 340, 280]));

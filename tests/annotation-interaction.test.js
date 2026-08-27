@@ -12,10 +12,40 @@ test('annotation canvases use bounding-box targeting so selected objects can be 
     assert.doesNotMatch(app, /fc\.perPixelTargetFind\s*=\s*true\s*;/);
 });
 
+test('completed rectangles and ellipses refresh their hit coordinates', () => {
+    assert.match(app, /case 'rect':[\s\S]{0,180}tempShape\.setCoords\(\)/);
+    assert.match(app, /case 'circle':[\s\S]{0,180}tempShape\.setCoords\(\)/);
+    assert.match(app, /finishedHL\.dirty=true;\s*finishedHL\.setCoords\(\)/,
+        'highlight boxes and ellipses need the same post-drag coordinate refresh');
+});
+
+test('existing PDF text uses a separate reversible editing mode', () => {
+    assert.match(app, /function handlePageTextPlacement\(canvas,eventInfo\)/);
+    assert.match(app, /activeTool!=='pageText'/);
+    assert.match(app, /new fabric\.Textbox\(originalText/);
+    assert.match(app, /pageTextOriginal:originalText/);
+    assert.match(app, /tool==='select'\|\|\(tool==='pageText'&&isPageTextReplacement\(obj\)\)/,
+        'Tool 1 edits everything while the PDF-text tool isolates replacement text');
+    assert.match(app, /delete this box to restore the original/);
+});
+
+test('paste and duplicate create new native annotation identities', () => {
+    const prepareStart = app.indexOf('function prepareClipboardObject(obj)');
+    const prepareEnd = app.indexOf('\nfunction keepObjectsInsideCanvas', prepareStart);
+    const prepare = app.slice(prepareStart, prepareEnd);
+    assert.match(prepare, /delete obj\.draftAnnotationId;\s*ensureDraftAnnotationId\(obj\)/);
+    assert.match(prepare, /if\(isPageTextReplacement\(obj\)\)delete obj\.pageTextSourceId/);
+});
+
 test('highlight compositing includes the live canvas backing-store scale', () => {
     assert.match(app, /function getLiveCanvasRenderTransform\(canvas\)/);
     assert.match(app, /backingWidth\/logicalWidth/);
     assert.match(app, /transform:getLiveCanvasRenderTransform\(fc\)/);
+});
+
+test('interactive top-canvas renders cannot repaint and darken highlights', () => {
+    assert.match(app, /fc\.on\('after:render',event=>\{/);
+    assert.match(app, /if\(event&&event\.ctx&&event\.ctx!==fc\.contextContainer\)return;/);
 });
 
 test('completed lines are rebuilt from their final endpoints before export', () => {

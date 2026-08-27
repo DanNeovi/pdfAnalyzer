@@ -6,6 +6,7 @@ Browser-based PDF markup tool for redlining drawings and documents. The app UI i
 
 - Load a PDF in the browser
 - Add annotations with select, pencil, line, arrow, rectangle, circle, cloud, text, and highlight tools
+- Replace existing searchable PDF text with reversible standard FreeText annotations (scanned image text requires OCR)
 - Automatically find 16, 14, and 12 gauge special stud/track cut-list rows (excluding flat straps), summarize quantities/weights, and export separated/combined CSV sections
 - Undo, redo, zoom, and navigate pages
 - Save the annotated result back out as a PDF
@@ -28,6 +29,9 @@ to embedded raster images. Inserted images are limited to 20 MB and downscaled t
 maximum 2048-pixel dimension before storage. Every native annotation receives a
 stable DraftAnnotator ID, semantic geometry, and a cropped 2x appearance stream.
 Existing annotations from other PDF editors are preserved when the file is saved.
+The Edit PDF Text tool deliberately does not rewrite arbitrary page content streams:
+it places an opaque editable FreeText replacement over the selected text. Deleting
+that replacement reveals the untouched original page text.
 
 Draft review saves materialize lazy annotated pages before export and serialize
 autosaves per page to prevent stale requests from overwriting newer edits. Text

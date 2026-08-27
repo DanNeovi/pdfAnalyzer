@@ -29,6 +29,95 @@
         return head.includes('%PDF-');
     }
 
+    function annotationTypeForNativeKind(kind){
+        switch(String(kind||'')){
+            case 'arrow':return 'arrow';
+            case 'doubleArrow':return 'doubleArrow';
+            case 'line':return 'line';
+            case 'cloud':return 'cloud';
+            case 'highlightPen':return 'highlightPen';
+            case 'highlightBox':return 'highlightBox';
+            case 'highlightEllipse':return 'highlightEllipse';
+            case 'stamp':return 'insertedImage';
+            default:return '';
+        }
+    }
+
+    function serializedObjectMatchesNativeKind(object,kind){
+        const type=String(object&&object.type||'').toLowerCase().replace(/-/g,'');
+        switch(String(kind||'')){
+            case 'arrow':case 'doubleArrow':return type==='group';
+            case 'freeText':return type==='itext'||type==='text'||type==='textbox';
+            case 'line':return type==='line';
+            case 'square':case 'highlightBox':return type==='rect';
+            case 'circle':case 'highlightEllipse':return type==='ellipse';
+            case 'cloud':case 'ink':case 'highlightPen':return type==='path';
+            case 'stamp':return type==='image';
+            default:return true;
+        }
+    }
+
+    function copyObjectMetadata(serializedObjects,sourceObjects,properties){
+        if(!Array.isArray(serializedObjects)||!Array.isArray(sourceObjects)||!Array.isArray(properties))return 0;
+        let copied=0;
+        serializedObjects.forEach((serialized,index)=>{
+            const source=sourceObjects[index];
+            if(!serialized||!source)return;
+            properties.forEach(property=>{
+                if(source[property]===undefined)return;
+                serialized[property]=source[property];
+                copied++;
+            });
+        });
+        return copied;
+    }
+
+    // Fabric 7.4 ignores Canvas#toJSON(propertiesToInclude), which caused the
+    // first native-annotation release to omit IDs and annotationType from the
+    // lossless payload. Native descriptors were written in the same page and
+    // stacking order, so those PDFs can be repaired deterministically.
+    function repairMissingObjectMetadata(payload){
+        const descriptors=payload&&payload.nativeAnnotations&&payload.nativeAnnotations.descriptors;
+        const pages=payload&&payload.pages;
+        if(!Array.isArray(descriptors)||!Array.isArray(pages))return 0;
+        const byPage=new Map();
+        descriptors.forEach(descriptor=>{
+            const pageIndex=Number(descriptor&&descriptor.pageIndex);
+            if(!Number.isInteger(pageIndex)||pageIndex<0)return;
+            if(!byPage.has(pageIndex))byPage.set(pageIndex,[]);
+            byPage.get(pageIndex).push(descriptor);
+        });
+        let repaired=0;
+        pages.forEach(page=>{
+            const pageIndex=Number(page&&page.pageNumber)-1;
+            const objects=page&&page.fabric&&page.fabric.objects;
+            const pageDescriptors=byPage.get(pageIndex)||[];
+            if(!Array.isArray(objects))return;
+            const usedIds=new Set(objects.map(object=>object&&object.draftAnnotationId).filter(Boolean));
+            objects.forEach((object,index)=>{
+                if(!object||typeof object!=='object')return;
+                let descriptor=object.draftAnnotationId
+                    ?pageDescriptors.find(item=>item.id===object.draftAnnotationId)
+                    :pageDescriptors.find(item=>!usedIds.has(item.id)&&serializedObjectMatchesNativeKind(object,item.kind));
+                if(!descriptor){
+                    const positional=pageDescriptors[index];
+                    if(positional&&!usedIds.has(positional.id))descriptor=positional;
+                }
+                if(!descriptor||typeof descriptor.id!=='string'||!descriptor.id)return;
+                if(!object.draftAnnotationId){
+                    object.draftAnnotationId=descriptor.id;
+                    usedIds.add(descriptor.id);
+                    repaired++;
+                }
+                if(!object.annotationType){
+                    const annotationType=annotationTypeForNativeKind(descriptor.kind);
+                    if(annotationType)object.annotationType=annotationType;
+                }
+            });
+        });
+        return repaired;
+    }
+
     function readStateFromAttachments(attachments){
         const nativeAttachment=findAttachment(attachments,NATIVE_ANNOTATIONS_NAME);
         if(nativeAttachment){
@@ -99,10 +188,12 @@
         MAX_SOURCE_BYTES,
         NATIVE_ANNOTATIONS_NAME,
         SOURCE_PDF_NAME,
+        copyObjectMetadata,
         embedNativeStateIntoPdf,
         embedStateIntoPdf,
         findAttachment,
         hasPdfHeader,
-        readStateFromAttachments
+        readStateFromAttachments,
+        repairMissingObjectMetadata
     };
 }));

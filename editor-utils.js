@@ -85,6 +85,22 @@
         };
     }
 
+    function getPageTextReplacementPlacement(metrics){
+        const layerWidth=Math.max(1,Number(metrics&&metrics.layerWidth)||1);
+        const layerHeight=Math.max(1,Number(metrics&&metrics.layerHeight)||1);
+        const sceneWidth=Math.max(1,Number(metrics&&metrics.sceneWidth)||layerWidth);
+        const sceneHeight=Math.max(1,Number(metrics&&metrics.sceneHeight)||layerHeight);
+        const scaleX=sceneWidth/layerWidth;
+        const scaleY=sceneHeight/layerHeight;
+        return {
+            left:(Number(metrics&&metrics.offsetLeft)||0)*scaleX,
+            top:(Number(metrics&&metrics.offsetTop)||0)*scaleY,
+            width:Math.max(8,(Number(metrics&&metrics.offsetWidth)||8)*Math.max(0.01,Number(metrics&&metrics.transformScaleX)||1)*scaleX),
+            fontSize:Math.max(4,(Number(metrics&&metrics.fontSize)||12)*scaleY),
+            angle:Number(metrics&&metrics.angle)||0
+        };
+    }
+
     function getClipboardImageBlob(clipboardData){
         if(!clipboardData)return null;
         const items=Array.from(clipboardData.items||[]);
@@ -117,6 +133,7 @@
         getClipboardObjectPlacement,
         getContainedImagePlacement,
         getContainTransform,
+        getPageTextReplacementPlacement,
         isWinAnsiCompatibleText,
         normalizeRotation,
         rotatePixelRect

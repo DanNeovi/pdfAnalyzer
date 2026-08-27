@@ -23,6 +23,38 @@ assert.equal(utils.readStateFromAttachments(null), null);
 assert.equal(utils.hasPdfHeader(new TextEncoder().encode('\n %PDF-2.0\n')), true);
 assert.equal(utils.hasPdfHeader(new TextEncoder().encode('not a pdf')), false);
 
+const serializedObjects=[{type:'Group'},{type:'Path'}];
+assert.equal(utils.copyObjectMetadata(serializedObjects,[
+    {draftAnnotationId:'group-id',annotationType:'arrow',selectable:false,evented:false},
+    {draftAnnotationId:'path-id',annotationType:'highlightPen',_hlBaseColor:'#ffff00'}
+],['draftAnnotationId','annotationType','selectable','evented','_hlBaseColor']),7);
+assert.deepEqual(serializedObjects,[
+    {type:'Group',draftAnnotationId:'group-id',annotationType:'arrow',selectable:false,evented:false},
+    {type:'Path',draftAnnotationId:'path-id',annotationType:'highlightPen',_hlBaseColor:'#ffff00'}
+]);
+
+const brokenNativePayload={
+    format:'draftannotator.annotations',
+    version:1,
+    pages:[{pageNumber:1,width:800,height:1000,fabric:{objects:[
+        {type:'Group'},
+        {type:'Path'},
+        {type:'Rect'}
+    ]}}],
+    nativeAnnotations:{version:1,descriptors:[
+        {id:'arrow-id',pageIndex:0,kind:'arrow',rect:[1,2,3,4]},
+        {id:'missing-text-id',pageIndex:0,kind:'freeText',rect:[2,3,4,5]},
+        {id:'cloud-id',pageIndex:0,kind:'cloud',rect:[5,6,7,8]},
+        {id:'highlight-id',pageIndex:0,kind:'highlightBox',rect:[9,10,11,12]}
+    ]}
+};
+assert.equal(utils.repairMissingObjectMetadata(brokenNativePayload),3);
+assert.deepEqual(
+    brokenNativePayload.pages[0].fabric.objects.map(object=>[object.draftAnnotationId,object.annotationType]),
+    [['arrow-id','arrow'],['cloud-id','cloud'],['highlight-id','highlightBox']]
+);
+assert.equal(utils.repairMissingObjectMetadata(brokenNativePayload),0);
+
 assert.throws(
     () => utils.readStateFromAttachments({source: attachments.source}),
     /incomplete/

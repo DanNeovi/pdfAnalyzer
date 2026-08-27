@@ -45,6 +45,12 @@ if(!window.EditorUtils){
             const transform=getContainTransform(sourceWidth,sourceHeight,targetWidth,targetHeight),offset=Number(delta)||0;
             return {left:transform.offsetX+(Number(object&&object.left)||0)*transform.scale+offset,top:transform.offsetY+(Number(object&&object.top)||0)*transform.scale+offset,scaleX:(Number(object&&object.scaleX)||1)*transform.scale,scaleY:(Number(object&&object.scaleY)||1)*transform.scale};
         },
+        getPageTextReplacementPlacement(metrics){
+            const lw=Math.max(1,Number(metrics&&metrics.layerWidth)||1),lh=Math.max(1,Number(metrics&&metrics.layerHeight)||1);
+            const sw=Math.max(1,Number(metrics&&metrics.sceneWidth)||lw),sh=Math.max(1,Number(metrics&&metrics.sceneHeight)||lh);
+            const sx=sw/lw,sy=sh/lh;
+            return {left:(Number(metrics&&metrics.offsetLeft)||0)*sx,top:(Number(metrics&&metrics.offsetTop)||0)*sy,width:Math.max(8,(Number(metrics&&metrics.offsetWidth)||8)*Math.max(0.01,Number(metrics&&metrics.transformScaleX)||1)*sx),fontSize:Math.max(4,(Number(metrics&&metrics.fontSize)||12)*sy),angle:Number(metrics&&metrics.angle)||0};
+        },
         getClipboardImageBlob(clipboardData){
             if(!clipboardData)return null;
             for(const item of Array.from(clipboardData.items||[])){
@@ -150,8 +156,8 @@ const savedStateByPage=new Map();
 const pendingEmbeddedPageAnnotations=new Map();
 const historyStack=[];
 let historyPointer=-1;
-const SERIALIZED_ANNOTATION_PROPS=['annotationType','selectable','evented','_hlBaseColor','draftAnnotationId'];
-const CLIPBOARD_OBJECT_PROPS=['annotationType','_hlBaseColor'];
+const SERIALIZED_ANNOTATION_PROPS=['annotationType','selectable','evented','_hlBaseColor','draftAnnotationId','pageTextSourceId','pageTextOriginal'];
+const CLIPBOARD_OBJECT_PROPS=['annotationType','_hlBaseColor','pageTextSourceId','pageTextOriginal'];
 const KEYBOARD_PASTE_OFFSET=15;
 const INTERNAL_CLIPBOARD_MIME='application/x-draftannotator-objects';
 const INTERNAL_CLIPBOARD_MARKER='DraftAnnotator annotation objects';
@@ -196,6 +202,17 @@ let specialStudAnalysisTimer=null;
 
 const FABRIC_MAJOR_VERSION=parseInt(String(window.fabric&&window.fabric.version||'5').split('.')[0],10)||5;
 
+// Fabric 6/7 serializes custom fields through a class-level allow-list. Keep
+// the explicit JSON patch below as well because some minor releases ignore
+// Canvas#toJSON(propertiesToInclude) even when object serialization supports it.
+const FABRIC_SERIALIZABLE_CLASSES=window.fabric?[window.fabric.FabricObject,window.fabric.Object]:[];
+FABRIC_SERIALIZABLE_CLASSES.filter(Boolean).forEach(ObjectClass=>{
+    ObjectClass.customProperties=Array.from(new Set([
+        ...(ObjectClass.customProperties||[]),
+        ...SERIALIZED_ANNOTATION_PROPS
+    ]));
+});
+
 function getFabricObjectType(object){
     return String(object&&object.type||object&&object.constructor&&object.constructor.type||'').toLowerCase().replace(/-/g,'');
 }
@@ -226,14 +243,15 @@ function loadFabricCanvasFromJson(canvas,json,onComplete,reviver){
     });
 }
 
-const TOOL_NAMES={select:'Select',draw:'Pencil',line:'Line',arrow:'Arrow',rect:'Rectangle',circle:'Circle',text:'Text',highlight:'Highlight',cloud:'Rev Cloud'};
+const TOOL_NAMES={select:'Select',draw:'Pencil',line:'Line',arrow:'Arrow',rect:'Rectangle',circle:'Circle',text:'Text',pageText:'Edit PDF Text',highlight:'Highlight',cloud:'Rev Cloud'};
 const SHAPE_TOOLS=['line','arrow','rect','circle','cloud'];
-const SHORTCUT_SCHEMA_VERSION=2;
+const SHORTCUT_SCHEMA_VERSION=3;
 const SHORTCUT_MODIFIER_CODES=new Set(['ShiftLeft','ShiftRight','ControlLeft','ControlRight','AltLeft','AltRight','MetaLeft','MetaRight']);
 const SHORTCUT_TOOL_FIELDS=[
     {id:'select',label:'Select tool',description:'Switch to select mode.',defaults:['Digit1','KeyS']},
     {id:'draw',label:'Pencil tool',description:'Switch to freehand drawing.',defaults:['Digit2','KeyD']},
     {id:'text',label:'Text tool',description:'Place a text annotation.',defaults:['Digit3','KeyT']},
+    {id:'pageText',label:'Edit PDF text',description:'Replace existing page text with a reversible editable FreeText annotation.',defaults:['KeyE']},
     {id:'line',label:'Line tool',description:'Draw a straight line.',defaults:['Digit4','KeyL']},
     {id:'arrow',label:'Arrow tool',description:'Draw an arrow annotation.',defaults:['Digit5','KeyA']},
     {id:'rect',label:'Rectangle tool',description:'Draw a rectangle.',defaults:['Digit6','KeyR']},
@@ -1172,7 +1190,24 @@ function persistHighlightModePreference(){
 
 // ─── HISTORY SYSTEM ─────────────────────────────────
 function getSerializedCanvasState(c){
-    return JSON.stringify(c.toJSON(SERIALIZED_ANNOTATION_PROPS));
+    return JSON.stringify(getCanvasJsonWithAnnotationMetadata(c));
+}
+
+function getCanvasJsonWithAnnotationMetadata(canvas){
+    const json=canvas.toJSON(SERIALIZED_ANNOTATION_PROPS);
+    const objects=canvas.getObjects();
+    if(!Array.isArray(json.objects))json.objects=[];
+    window.EmbeddedAnnotationUtils.copyObjectMetadata(
+        json.objects,objects,SERIALIZED_ANNOTATION_PROPS);
+    return json;
+}
+
+function copySerializedAnnotationMetadata(source,target){
+    if(!source||!target)return target;
+    SERIALIZED_ANNOTATION_PROPS.forEach(property=>{
+        if(source[property]!==undefined)target[property]=source[property];
+    });
+    return target;
 }
 
 let draftAnnotationIdSequence=0;
@@ -1186,6 +1221,16 @@ function ensureDraftAnnotationId(object){
     if(!object)return '';
     if(!object.draftAnnotationId)object.draftAnnotationId=createDraftAnnotationId();
     return object.draftAnnotationId;
+}
+
+function ensureUniqueDraftAnnotationId(object,usedIds){
+    let id=ensureDraftAnnotationId(object);
+    if(usedIds&&usedIds.has(id)){
+        object.draftAnnotationId=createDraftAnnotationId();
+        id=object.draftAnnotationId;
+    }
+    if(usedIds)usedIds.add(id);
+    return id;
 }
 
 function syncPendingTextEdits(){
@@ -1273,7 +1318,7 @@ async function createAnnotationPackage(nativeDescriptors=[]){
     const pages=[];
     fabricCanvases.forEach((canvas,pageNumber)=>{
         const size=annotationPageSize(canvas);
-        const json=canvas.toJSON(SERIALIZED_ANNOTATION_PROPS);
+        const json=getCanvasJsonWithAnnotationMetadata(canvas);
         if(json.objects&&json.objects.length){
             pages.push({pageNumber,width:size.width,height:size.height,fabric:json});
         }
@@ -1336,11 +1381,14 @@ async function readEmbeddedAnnotationState(pdfProxy){
     if(!pdfProxy||typeof pdfProxy.getAttachments!=='function')return null;
     const attachments=await pdfProxy.getAttachments();
     const state=window.EmbeddedAnnotationUtils.readStateFromAttachments(attachments);
-    return state?{
+    if(!state)return null;
+    const payload=ensureAnnotationPackage(state.payload);
+    window.EmbeddedAnnotationUtils.repairMissingObjectMetadata(payload);
+    return {
         mode:state.mode||'legacy',
         sourcePdfBytes:state.sourcePdfBytes,
-        payload:ensureAnnotationPackage(state.payload)
-    }:null;
+        payload
+    };
 }
 
 async function createNativeEditingPdf(pdfBytes){
@@ -1406,9 +1454,7 @@ async function enlivenFabricObjects(objects){
     });
     (enlivened||[]).forEach((object,index)=>{
         const source=serialized[index]||{};
-        if(source.annotationType)object.annotationType=source.annotationType;
-        if(source._hlBaseColor)object._hlBaseColor=source._hlBaseColor;
-        if(source.draftAnnotationId)object.draftAnnotationId=source.draftAnnotationId;
+        copySerializedAnnotationMetadata(source,object);
     });
     return enlivened||[];
 }
@@ -1438,13 +1484,8 @@ async function restoreEmbeddedPageAnnotations(targetCanvas,pageData){
             if(actual&&saved&&!nativeDescriptorsEqual(actual,saved)){
                 reconcileFabricObjectWithNativeAnnotation(object,actual,saved,targetCanvas,jsPage);
             }
-            if(isHighlightLayerObject(object)){
-                normalizeHighlightVisual(object);
-                applyHighlightSelectability(object,activeTool==='select');
-            }else{
-                object.selectable=activeTool==='select';
-                object.evented=activeTool==='select';
-            }
+            if(isHighlightLayerObject(object))normalizeHighlightVisual(object);
+            applyObjectInteractivity(object);
             if(isTextObject(object))configureTextObjectRendering(object);
             targetCanvas.add(object);
         });
@@ -1537,7 +1578,10 @@ function reconcileFabricObjectWithNativeAnnotation(object,actual,saved,canvas,js
     }else{
         object._hlBaseColor=color;
     }
-    if(Array.isArray(actual.fillColor)&&supportsFillObject(object))object.set({fill:nativeRgbToHex(actual.fillColor)});
+    if(Array.isArray(actual.fillColor)){
+        if(isPageTextReplacement(object))object.set({backgroundColor:nativeRgbToHex(actual.fillColor)});
+        else if(supportsFillObject(object))object.set({fill:nativeRgbToHex(actual.fillColor)});
+    }
     object.setCoords();
 }
 
@@ -1584,24 +1628,15 @@ function undo(){
         canvas._restoring=false;
         historyRestoreInProgress=false;
         refreshCanvasTextRendering(canvas);
-        const selectMode=activeTool==='select';
         canvas.forEachObject(o=>{
-            if(isHighlightLayerObject(o)){
-                normalizeHighlightVisual(o);
-                applyHighlightSelectability(o,selectMode);
-            }else{
-                o.selectable=selectMode;o.evented=selectMode;
-            }
+            if(isHighlightLayerObject(o))normalizeHighlightVisual(o);
+            applyObjectInteractivity(o);
         });
         canvas.renderAll();
         canvas._lastSavedState=entry.state;
         recomputeUnsavedChanges();
         syncSizeControl();
-    },(o,obj)=>{
-        if(o.annotationType)obj.annotationType=o.annotationType;
-        if(o._hlBaseColor)obj._hlBaseColor=o._hlBaseColor;
-        if(o.draftAnnotationId)obj.draftAnnotationId=o.draftAnnotationId;
-    }).catch(error=>{
+    },copySerializedAnnotationMetadata).catch(error=>{
         canvas._restoring=false;historyRestoreInProgress=false;historyPointer++;
         console.error('Undo restore failed:',error);showMsg('Undo failed');
     });
@@ -1626,24 +1661,15 @@ function redo(){
         canvas._restoring=false;
         historyRestoreInProgress=false;
         refreshCanvasTextRendering(canvas);
-        const selectMode=activeTool==='select';
         canvas.forEachObject(o=>{
-            if(isHighlightLayerObject(o)){
-                normalizeHighlightVisual(o);
-                applyHighlightSelectability(o,selectMode);
-            }else{
-                o.selectable=selectMode;o.evented=selectMode;
-            }
+            if(isHighlightLayerObject(o))normalizeHighlightVisual(o);
+            applyObjectInteractivity(o);
         });
         canvas.renderAll();
         canvas._lastSavedState=entry.state;
         recomputeUnsavedChanges();
         syncSizeControl();
-    },(o,obj)=>{
-        if(o.annotationType)obj.annotationType=o.annotationType;
-        if(o._hlBaseColor)obj._hlBaseColor=o._hlBaseColor;
-        if(o.draftAnnotationId)obj.draftAnnotationId=o.draftAnnotationId;
-    }).catch(error=>{
+    },copySerializedAnnotationMetadata).catch(error=>{
         canvas._restoring=false;historyRestoreInProgress=false;historyPointer--;
         console.error('Redo restore failed:',error);showMsg('Redo failed');
     });
@@ -1695,6 +1721,21 @@ function rgbaFromHex(hex,alpha){
 
 function isTextObject(obj){
     return !!obj&&(isFabricType(obj,'itext','text','fabrictext','textbox')||(fabric.IText&&obj instanceof fabric.IText));
+}
+
+function isPageTextReplacement(obj){
+    return !!obj&&isTextObject(obj)&&obj.annotationType==='pageTextReplacement';
+}
+
+function isObjectEditableForTool(obj,tool=activeTool){
+    return tool==='select'||(tool==='pageText'&&isPageTextReplacement(obj));
+}
+
+function applyObjectInteractivity(obj,tool=activeTool){
+    if(!obj)return;
+    const canEdit=isObjectEditableForTool(obj,tool);
+    if(isHighlightLayerObject(obj))applyHighlightSelectability(obj,canEdit);
+    else obj.set({selectable:canEdit,evented:canEdit});
 }
 
 function updateEditingTextLayout(obj){
@@ -2092,6 +2133,12 @@ function enlivenClipboardObjects(serializedObjects){
 
 function prepareClipboardObject(obj){
     if(!obj)return;
+    // A pasted object is a new PDF annotation. Fabric 7 class-level custom
+    // properties can include IDs even when a smaller toObject allow-list is
+    // requested, so explicitly break both identities before adding the copy.
+    delete obj.draftAnnotationId;
+    ensureDraftAnnotationId(obj);
+    if(isPageTextReplacement(obj))delete obj.pageTextSourceId;
     obj.set({selectable:true,evented:true});
     if(isHighlightLayerObject(obj)){
         normalizeHighlightVisual(obj);
@@ -2440,7 +2487,7 @@ function configureHighlightBrush(canvas){
 }
 
 function getCursorForTool(t){
-    return (isFreeDrawModeTool(t)||isShapeModeTool(t))?'crosshair':t==='text'?'text':'default';
+    return (isFreeDrawModeTool(t)||isShapeModeTool(t))?'crosshair':(t==='text'||t==='pageText')?'text':'default';
 }
 
 function stopPanning(){
@@ -2478,12 +2525,8 @@ function setActiveTool(t,{announce=true,persist=true}={}){
         }
         c.defaultCursor=cursor;
         c.forEachObject(o=>{
-            if(isHighlightLayerObject(o)){
-                normalizeHighlightVisual(o);
-                applyHighlightSelectability(o,isSelect);
-            }else{
-                o.selectable=isSelect;o.evented=isSelect;
-            }
+            if(isHighlightLayerObject(o))normalizeHighlightVisual(o);
+            applyObjectInteractivity(o,t);
         });
         if(!isSelect)c.discardActiveObject();
         c.requestRenderAll();
@@ -2922,9 +2965,11 @@ function handleShapeEnd(){
         }
         case 'rect':
             tempShape.set({selectable:true,evented:true,hasControls:true,hasBorders:true});
+            tempShape.setCoords();
             break;
         case 'circle':
             tempShape.set({selectable:true,evented:true,hasControls:true,hasBorders:true});
+            tempShape.setCoords();
             break;
         case 'cloud':{
             const l=tempShape.left,t=tempShape.top,w=tempShape.width,h=tempShape.height;
@@ -2947,6 +2992,7 @@ function handleShapeEnd(){
                 objectCaching:false
             });
             finishedHL.dirty=true;
+            finishedHL.setCoords();
             applyHighlightSelectability(finishedHL, activeTool==='select');
             break;
         }
@@ -2983,6 +3029,132 @@ function handleTextPlacement(c,o){
     c.setActiveObject(txt);txt.enterEditing();
     hasPendingTextEdits=true;
     hasUnsavedChanges=true;
+}
+
+function getPdfTextLayerSpans(layer){
+    return Array.from(layer&&layer.children||[]).filter(element=>
+        element&&element.tagName==='SPAN'&&String(element.textContent||'').trim());
+}
+
+function findPdfTextSpanAtClientPoint(layer,clientX,clientY,padding=3){
+    let best=null;
+    let bestArea=Infinity;
+    getPdfTextLayerSpans(layer).forEach(span=>{
+        const rect=span.getBoundingClientRect();
+        if(clientX<rect.left-padding||clientX>rect.right+padding||
+            clientY<rect.top-padding||clientY>rect.bottom+padding)return;
+        const area=Math.max(1,rect.width*rect.height);
+        if(area<bestArea){best=span;bestArea=area;}
+    });
+    return best;
+}
+
+function stablePageTextSourceId(pageNumber,left,top,text){
+    let hash=2166136261;
+    for(const character of String(text||'')){
+        hash^=character.codePointAt(0);
+        hash=Math.imul(hash,16777619);
+    }
+    return `${pageNumber}:${Math.round(left*10)}:${Math.round(top*10)}:${(hash>>>0).toString(36)}`;
+}
+
+function getElementTransformInfo(element){
+    const transform=getComputedStyle(element).transform;
+    if(!transform||transform==='none')return {angle:0,scaleX:1};
+    const match=/^matrix\(([^)]+)\)$/.exec(transform);
+    if(!match)return {angle:0,scaleX:1};
+    const values=match[1].split(',').map(Number);
+    if(values.length!==6||values.some(value=>!Number.isFinite(value)))return {angle:0,scaleX:1};
+    return {
+        angle:Math.atan2(values[1],values[0])*180/Math.PI,
+        scaleX:Math.max(0.01,Math.hypot(values[0],values[1]))
+    };
+}
+
+async function ensurePdfTextLayerReadyForEditing(pageNumber,container){
+    let layer=container.querySelector('.pdf-text-layer');
+    for(let attempt=0;attempt<3&&layer&&!getPdfTextLayerSpans(layer).length;attempt++){
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+    }
+    if(layer&&getPdfTextLayerSpans(layer).length)return layer;
+    const page=await pdfDoc.getPage(pageNumber);
+    if(layer)delete layer.dataset.viewportKey;
+    const viewport=page.getViewport({scale});
+    await renderPdfTextLayer(page,viewport,container,viewport.width,viewport.height);
+    return container.querySelector('.pdf-text-layer');
+}
+
+async function handlePageTextPlacement(canvas,eventInfo){
+    if(activeTool!=='pageText'||!canvas||!eventInfo||!eventInfo.e||canvas._pageTextPlacementBusy)return;
+    canvas._pageTextPlacementBusy=true;
+    const clientX=Number(eventInfo.e.clientX),clientY=Number(eventInfo.e.clientY);
+    try{
+        const pageNumber=canvas._pageNum||currentVisiblePage;
+        const container=document.querySelector(`[data-page-num="${pageNumber}"]`);
+        if(!container||!Number.isFinite(clientX)||!Number.isFinite(clientY))return;
+        const layer=await ensurePdfTextLayerReadyForEditing(pageNumber,container);
+        const span=findPdfTextSpanAtClientPoint(layer,clientX,clientY);
+        if(!span){showMsg('No editable PDF text at that point (scanned text is an image)');return;}
+
+        const scene=annotationPageSize(canvas);
+        const layerWidth=Math.max(1,layer.offsetWidth||parseFloat(layer.style.width)||container.clientWidth||1);
+        const layerHeight=Math.max(1,layer.offsetHeight||parseFloat(layer.style.height)||container.clientHeight||1);
+        const style=getComputedStyle(span);
+        const transform=getElementTransformInfo(span);
+        const placement=window.EditorUtils.getPageTextReplacementPlacement({
+            layerWidth,layerHeight,
+            sceneWidth:scene.width,sceneHeight:scene.height,
+            offsetLeft:span.offsetLeft,offsetTop:span.offsetTop,
+            offsetWidth:Number(span.offsetWidth)||parseFloat(style.width)||8,
+            transformScaleX:transform.scaleX,
+            fontSize:parseFloat(style.fontSize)||Number(span.offsetHeight)||12,
+            angle:transform.angle
+        });
+        const {left,top,width,fontSize}=placement;
+        const originalText=String(span.textContent||'');
+        const sourceId=stablePageTextSourceId(pageNumber,left,top,originalText);
+        const existing=canvas.getObjects().find(object=>isPageTextReplacement(object)&&object.pageTextSourceId===sourceId);
+        if(existing){
+            canvas.setActiveObject(existing);
+            if(typeof existing.enterEditing==='function')existing.enterEditing();
+            canvas.requestRenderAll();
+            return;
+        }
+
+        const replacement=new fabric.Textbox(originalText,{
+            left,top,width,
+            angle:placement.angle,
+            fontFamily:'sans-serif',
+            fontSize,
+            lineHeight:1,
+            fill:'#000000',
+            backgroundColor:'#ffffff',
+            padding:1,
+            selectable:true,
+            evented:true,
+            annotationType:'pageTextReplacement',
+            pageTextSourceId:sourceId,
+            pageTextOriginal:originalText
+        });
+        configureTextObjectRendering(replacement);
+        canvas._suppressHistory=true;
+        canvas.add(replacement);
+        canvas._suppressHistory=false;
+        canvas.setActiveObject(replacement);
+        replacement.enterEditing();
+        replacement.selectionStart=0;
+        replacement.selectionEnd=originalText.length;
+        updateEditingTextLayout(replacement);
+        hasPendingTextEdits=true;
+        hasUnsavedChanges=true;
+        canvas.requestRenderAll();
+        showMsg('Replace the selected PDF text; delete this box to restore the original');
+    }catch(error){
+        console.error('PDF text edit failed:',error);
+        showMsg('Could not edit that PDF text');
+    }finally{
+        canvas._pageTextPlacementBusy=false;
+    }
 }
 
 function updateSelectedObjectProperties(){
@@ -3416,7 +3588,12 @@ async function renderPage(n,containerOverride=null){
         // Flat highlight compositing — see compositeHighlightLayer.
         // Fabric's own pass draws highlights at opacity:0 (nothing visible);
         // this hook paints the merged flat region once per frame.
-        fc.on('after:render',()=>{
+        fc.on('after:render',event=>{
+            // Fabric fires after:render for both the lower scene canvas and
+            // the interactive top canvas. Top-canvas renders happen many
+            // times during a pointer drag and do not clear the lower canvas;
+            // painting there again made highlights progressively darker.
+            if(event&&event.ctx&&event.ctx!==fc.contextContainer)return;
             compositeHighlightLayer(fc, fc.contextContainer, {
                 destWidth:fc.lowerCanvasEl.width,
                 destHeight:fc.lowerCanvasEl.height,
@@ -3492,11 +3669,11 @@ async function renderPage(n,containerOverride=null){
             empties.forEach(o=>fc.remove(o));
             fc._suppressHistory=false;
             if(empties.length>0)fc.renderAll();
-            // Re-lock objects if not in select mode
-            if(activeTool!=='select'){
-                fc.forEachObject(o=>{o.selectable=false;o.evented=false;});
-                fc.discardActiveObject();fc.renderAll();
-            }
+            // Keep only the objects belonging to the active editing mode live.
+            fc.forEachObject(o=>applyObjectInteractivity(o));
+            const activeObj=fc.getActiveObject();
+            if(activeObj&&!isObjectEditableForTool(activeObj))fc.discardActiveObject();
+            fc.renderAll();
             saveCanvasState(fc);
         });
 
@@ -3526,6 +3703,7 @@ async function renderPage(n,containerOverride=null){
                 if(isShapeModeTool(activeTool)) handleShapeStart(fc,o);
             }else if(!o.target){
                 if(activeTool==='text') handleTextPlacement(fc,o);
+                else if(activeTool==='pageText')void handlePageTextPlacement(fc,o);
             }
         });
 
@@ -4095,6 +4273,7 @@ function renderNativeObjectAppearance(canvas,object,rotation){
 
 async function createNativeAnnotationDescriptors(baseDoc){
     const descriptors=[];
+    const usedAnnotationIds=new Set();
     const containers=Array.from(document.querySelectorAll('.pdf-page-container'))
         .sort((a,b)=>parseInt(a.dataset.pageNum,10)-parseInt(b.dataset.pageNum,10));
     for(let containerIndex=0;containerIndex<containers.length;containerIndex++){
@@ -4128,7 +4307,9 @@ async function createNativeAnnotationDescriptors(baseDoc){
                 const strokeSource=getNativeStrokeSource(object,kind);
                 const colorSource=isTextObject(object)?object.fill:(isHighlightLayerObject(object)?object._hlBaseColor:strokeSource.stroke||object.fill);
                 const nativeColor=parseCssColor(colorSource);
-                let fill=isHighlightAreaObject(object)
+                let fill=isPageTextReplacement(object)
+                    ?parseCssColor(object.backgroundColor||'#ffffff',[1,1,1])
+                    :isHighlightAreaObject(object)
                     ?parseCssColor(object._hlBaseColor||object.fill)
                     :((supportsFillObject(object)&&object.fill&&object.fill!=='transparent')?parseCssColor(object.fill):null);
                 if(kind==='arrow'||kind==='doubleArrow')fill=nativeColor.slice();
@@ -4137,7 +4318,7 @@ async function createNativeAnnotationDescriptors(baseDoc){
                     (rotatedAxes?box.w:box.h)/pixelHeight)/2;
                 const rawOpacity=Number(object.opacity);
                 const descriptor={
-                    id:ensureDraftAnnotationId(object),
+                    id:ensureUniqueDraftAnnotationId(object,usedAnnotationIds),
                     pageIndex:pageNumber-1,
                     kind,
                     rect,
@@ -5395,12 +5576,9 @@ function applyDraftAnnotationsToCanvas(canvas,pageNumber,fabricJson,onDone){
             loadFabricCanvasFromJson(canvas,fabricJson,()=>{
                 canvas._restoring=false;
                 refreshCanvasTextRendering(canvas);
-                const selectMode=activeTool==='select';
                 canvas.forEachObject(o=>{
-                    if(isHighlightLayerObject(o)){
-                        normalizeHighlightVisual(o);
-                        applyHighlightSelectability(o,selectMode);
-                    }
+                    if(isHighlightLayerObject(o))normalizeHighlightVisual(o);
+                    applyObjectInteractivity(o);
                 });
                 canvas.renderAll();
                 canvas._lastSavedState=fabricJson;
@@ -5408,11 +5586,7 @@ function applyDraftAnnotationsToCanvas(canvas,pageNumber,fabricJson,onDone){
                 savedStateByPage.set(pageNumber,fabricJson);
                 if(onDone)onDone();
                 resolve();
-            },(o,obj)=>{
-                if(o.annotationType)obj.annotationType=o.annotationType;
-                if(o._hlBaseColor)obj._hlBaseColor=o._hlBaseColor;
-                if(o.draftAnnotationId)obj.draftAnnotationId=o.draftAnnotationId;
-            }).catch(error=>{
+            },copySerializedAnnotationMetadata).catch(error=>{
                 canvas._restoring=false;
                 reject(error);
             });
@@ -5588,7 +5762,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-08-26 11:38 PDT';
+        const built='2026-08-27 14:47 PDT';
         bd.textContent='Built '+built;
     }
 }
