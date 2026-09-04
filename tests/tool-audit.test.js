@@ -24,8 +24,8 @@ test('every creation path produces a saved editable object', () => {
         /new fabric\.Textbox\(originalText/,      // existing PDF text replacement
         /new fabric\.Line\(\[x1,y1,x2,y2\]/,     // finalized line
         /createArrowGroup\(x1,y1,x2,y2/,          // arrow and double arrow
-        /case 'rect':[\s\S]{0,180}setCoords\(\)/,
-        /case 'circle':[\s\S]{0,180}setCoords\(\)/,
+        /finishedRect\.setCoords\(\)/,
+        /finishedEllipse\.setCoords\(\)/,
         /createRevisionCloud\(l,t,w,h\)/,
         /finishedHL\.setCoords\(\)/,              // box and ellipse highlights
         /annotationType:'insertedImage'/

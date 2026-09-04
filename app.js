@@ -1735,7 +1735,12 @@ function applyObjectInteractivity(obj,tool=activeTool){
     if(!obj)return;
     const canEdit=isObjectEditableForTool(obj,tool);
     if(isHighlightLayerObject(obj))applyHighlightSelectability(obj,canEdit);
-    else obj.set({selectable:canEdit,evented:canEdit});
+    else obj.set({selectable:canEdit,evented:canEdit,perPixelTargetFind:false});
+    // Tool changes happen after Fabric's pointer event that finalized a drawn
+    // shape. Refresh the cached hit polygon at the moment editing is enabled so
+    // a new, restored, pasted, undone, or redone object is clickable on the very
+    // first pointer-down instead of only after marquee selection.
+    if(canEdit&&typeof obj.setCoords==='function')obj.setCoords();
 }
 
 function updateEditingTextLayout(obj){
@@ -2963,14 +2968,46 @@ function handleShapeEnd(){
             }
             break;
         }
-        case 'rect':
-            tempShape.set({selectable:true,evented:true,hasControls:true,hasBorders:true});
-            tempShape.setCoords();
+        case 'rect':{
+            // Fabric caches geometry for the zero-size preview that is added on
+            // mouse-down. Updating width/height and calling setCoords() is not
+            // sufficient in every Fabric 7 interaction path: point selection can
+            // keep using the preview's empty hit area until a marquee selection
+            // or another annotation interaction rebuilds the cache. Finalize with
+            // a fresh object so its first hit-test has the completed dimensions.
+            const finishedRect=new fabric.Rect({
+                left:tempShape.left,top:tempShape.top,
+                width:tempShape.width,height:tempShape.height,
+                stroke:tempShape.stroke,strokeWidth:tempShape.strokeWidth,
+                fill:tempShape.fill,
+                strokeUniform:true,
+                selectable:true,evented:true,
+                hasControls:true,hasBorders:true,
+                perPixelTargetFind:false,
+                annotationType:'rect'
+            });
+            shapeCanvas.remove(tempShape);
+            finishedRect.setCoords();
+            shapeCanvas.add(finishedRect);
             break;
-        case 'circle':
-            tempShape.set({selectable:true,evented:true,hasControls:true,hasBorders:true});
-            tempShape.setCoords();
+        }
+        case 'circle':{
+            const finishedEllipse=new fabric.Ellipse({
+                left:tempShape.left,top:tempShape.top,
+                rx:tempShape.rx,ry:tempShape.ry,
+                stroke:tempShape.stroke,strokeWidth:tempShape.strokeWidth,
+                fill:tempShape.fill,
+                strokeUniform:true,
+                selectable:true,evented:true,
+                hasControls:true,hasBorders:true,
+                perPixelTargetFind:false,
+                annotationType:'circle'
+            });
+            shapeCanvas.remove(tempShape);
+            finishedEllipse.setCoords();
+            shapeCanvas.add(finishedEllipse);
             break;
+        }
         case 'cloud':{
             const l=tempShape.left,t=tempShape.top,w=tempShape.width,h=tempShape.height;
             shapeCanvas.remove(tempShape);
@@ -5762,7 +5799,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-08-27 14:47 PDT';
+        const built='2026-09-04 11:52 PDT';
         bd.textContent='Built '+built;
     }
 }

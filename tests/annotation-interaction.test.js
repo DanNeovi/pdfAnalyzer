@@ -10,11 +10,16 @@ test('annotation canvases use bounding-box targeting so selected objects can be 
     assert.match(app, /fc\.targetFindTolerance\s*=\s*15\s*;/);
     assert.match(app, /fc\.perPixelTargetFind\s*=\s*false\s*;/);
     assert.doesNotMatch(app, /fc\.perPixelTargetFind\s*=\s*true\s*;/);
+    assert.match(app, /obj\.set\(\{selectable:canEdit,evented:canEdit,perPixelTargetFind:false\}\);\s*\/\/[\s\S]*?if\(canEdit&&typeof obj\.setCoords==='function'\)obj\.setCoords\(\);/,
+        'Tool 1 must refresh every editable object hit area, including restored objects');
 });
 
-test('completed rectangles and ellipses refresh their hit coordinates', () => {
-    assert.match(app, /case 'rect':[\s\S]{0,180}tempShape\.setCoords\(\)/);
-    assert.match(app, /case 'circle':[\s\S]{0,180}tempShape\.setCoords\(\)/);
+test('completed rectangles and ellipses rebuild zero-size previews for immediate hit testing', () => {
+    const finalizeStart = app.indexOf('function handleShapeEnd()');
+    const finalizeEnd = app.indexOf('function handleTextPlacement', finalizeStart);
+    const finalize = app.slice(finalizeStart, finalizeEnd);
+    assert.match(finalize, /case 'rect':\{[\s\S]*?new fabric\.Rect\(\{[\s\S]*?perPixelTargetFind:false[\s\S]*?shapeCanvas\.remove\(tempShape\);[\s\S]*?finishedRect\.setCoords\(\);[\s\S]*?shapeCanvas\.add\(finishedRect\);/);
+    assert.match(finalize, /case 'circle':\{[\s\S]*?new fabric\.Ellipse\(\{[\s\S]*?perPixelTargetFind:false[\s\S]*?shapeCanvas\.remove\(tempShape\);[\s\S]*?finishedEllipse\.setCoords\(\);[\s\S]*?shapeCanvas\.add\(finishedEllipse\);/);
     assert.match(app, /finishedHL\.dirty=true;\s*finishedHL\.setCoords\(\)/,
         'highlight boxes and ellipses need the same post-drag coordinate refresh');
 });
