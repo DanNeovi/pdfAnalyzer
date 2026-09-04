@@ -5799,7 +5799,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-09-04 11:58 PDT';
+        const built='2026-09-04 12:06 PDT';
         bd.textContent='Built '+built;
     }
 }
