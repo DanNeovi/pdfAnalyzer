@@ -45,12 +45,6 @@ if(!window.EditorUtils){
             const transform=getContainTransform(sourceWidth,sourceHeight,targetWidth,targetHeight),offset=Number(delta)||0;
             return {left:transform.offsetX+(Number(object&&object.left)||0)*transform.scale+offset,top:transform.offsetY+(Number(object&&object.top)||0)*transform.scale+offset,scaleX:(Number(object&&object.scaleX)||1)*transform.scale,scaleY:(Number(object&&object.scaleY)||1)*transform.scale};
         },
-        getPageTextReplacementPlacement(metrics){
-            const lw=Math.max(1,Number(metrics&&metrics.layerWidth)||1),lh=Math.max(1,Number(metrics&&metrics.layerHeight)||1);
-            const sw=Math.max(1,Number(metrics&&metrics.sceneWidth)||lw),sh=Math.max(1,Number(metrics&&metrics.sceneHeight)||lh);
-            const sx=sw/lw,sy=sh/lh;
-            return {left:(Number(metrics&&metrics.offsetLeft)||0)*sx,top:(Number(metrics&&metrics.offsetTop)||0)*sy,width:Math.max(8,(Number(metrics&&metrics.offsetWidth)||8)*Math.max(0.01,Number(metrics&&metrics.transformScaleX)||1)*sx),fontSize:Math.max(4,(Number(metrics&&metrics.fontSize)||12)*sy),angle:Number(metrics&&metrics.angle)||0};
-        },
         getClipboardImageBlob(clipboardData){
             if(!clipboardData)return null;
             for(const item of Array.from(clipboardData.items||[])){
@@ -226,7 +220,32 @@ function getCanvasScenePoint(canvas,event){
     return typeof canvas.getScenePoint==='function'?canvas.getScenePoint(event):canvas.getPointer(event);
 }
 
+// Bound each live bitmap; CSS dimensions and annotation coordinates stay exact.
+const MAX_CANVAS_PIXELS=8*1024*1024;
+const MAX_CANVAS_SIDE=8192;
+function getCanvasPixelRatio(width,height){
+    width=Math.max(1,width);height=Math.max(1,height);
+    return Math.min(window.devicePixelRatio||1,MAX_CANVAS_SIDE/width,
+        MAX_CANVAS_SIDE/height,Math.sqrt(MAX_CANVAS_PIXELS/(width*height)));
+}
+
+function configureCanvasPixelBudget(canvas){
+    canvas._renderPixelRatio=1;
+    canvas.getRetinaScaling=function(){return this.enableRetinaScaling?this._renderPixelRatio:1;};
+    // Fabric 7's DOM manager only applies ratios above 1. Support reduced
+    // backing stores as well, while retaining logical dimensions for input.
+    const setDimensions=canvas.elements.setDimensions.bind(canvas.elements);
+    canvas.elements.setDimensions=function(size,ratio){
+        if(ratio>=1){setDimensions(size,ratio);return;}
+        setDimensions({width:Math.max(1,Math.floor(size.width*ratio)),
+            height:Math.max(1,Math.floor(size.height*ratio))},1);
+        this.lower.ctx.scale(ratio,ratio);
+        this.upper.ctx.scale(ratio,ratio);
+    };
+}
+
 function setFabricCanvasDimensions(canvas,width,height){
+    if(canvas._renderPixelRatio!==undefined)canvas._renderPixelRatio=getCanvasPixelRatio(width,height);
     if(typeof canvas.setDimensions==='function')canvas.setDimensions({width,height});
     else{canvas.setWidth(width);canvas.setHeight(height);}
 }
@@ -243,7 +262,7 @@ function loadFabricCanvasFromJson(canvas,json,onComplete,reviver){
     });
 }
 
-const TOOL_NAMES={select:'Select',draw:'Pencil',line:'Line',arrow:'Arrow',rect:'Rectangle',circle:'Circle',text:'Text',pageText:'Edit PDF Text',highlight:'Highlight',cloud:'Rev Cloud'};
+const TOOL_NAMES={select:'Select',draw:'Pencil',line:'Line',arrow:'Arrow',rect:'Rectangle',circle:'Circle',text:'Text',highlight:'Highlight',cloud:'Rev Cloud'};
 const SHAPE_TOOLS=['line','arrow','rect','circle','cloud'];
 const SHORTCUT_SCHEMA_VERSION=3;
 const SHORTCUT_MODIFIER_CODES=new Set(['ShiftLeft','ShiftRight','ControlLeft','ControlRight','AltLeft','AltRight','MetaLeft','MetaRight']);
@@ -251,7 +270,6 @@ const SHORTCUT_TOOL_FIELDS=[
     {id:'select',label:'Select tool',description:'Switch to select mode.',defaults:['Digit1','KeyS']},
     {id:'draw',label:'Pencil tool',description:'Switch to freehand drawing.',defaults:['Digit2','KeyD']},
     {id:'text',label:'Text tool',description:'Place a text annotation.',defaults:['Digit3','KeyT']},
-    {id:'pageText',label:'Edit PDF text',description:'Replace existing page text with a reversible editable FreeText annotation.',defaults:['KeyE']},
     {id:'line',label:'Line tool',description:'Draw a straight line.',defaults:['Digit4','KeyL']},
     {id:'arrow',label:'Arrow tool',description:'Draw an arrow annotation.',defaults:['Digit5','KeyA']},
     {id:'rect',label:'Rectangle tool',description:'Draw a rectangle.',defaults:['Digit6','KeyR']},
@@ -1736,7 +1754,7 @@ function isPageTextReplacement(obj){
 }
 
 function isObjectEditableForTool(obj,tool=activeTool){
-    return tool==='select'||(tool==='pageText'&&isPageTextReplacement(obj));
+    return tool==='select';
 }
 
 function applyObjectInteractivity(obj,tool=activeTool){
@@ -2500,7 +2518,7 @@ function configureHighlightBrush(canvas){
 }
 
 function getCursorForTool(t){
-    return (isFreeDrawModeTool(t)||isShapeModeTool(t))?'crosshair':(t==='text'||t==='pageText')?'text':'default';
+    return (isFreeDrawModeTool(t)||isShapeModeTool(t))?'crosshair':t==='text'?'text':'default';
 }
 
 function stopPanning(){
@@ -3076,132 +3094,6 @@ function handleTextPlacement(c,o){
     hasUnsavedChanges=true;
 }
 
-function getPdfTextLayerSpans(layer){
-    return Array.from(layer&&layer.children||[]).filter(element=>
-        element&&element.tagName==='SPAN'&&String(element.textContent||'').trim());
-}
-
-function findPdfTextSpanAtClientPoint(layer,clientX,clientY,padding=3){
-    let best=null;
-    let bestArea=Infinity;
-    getPdfTextLayerSpans(layer).forEach(span=>{
-        const rect=span.getBoundingClientRect();
-        if(clientX<rect.left-padding||clientX>rect.right+padding||
-            clientY<rect.top-padding||clientY>rect.bottom+padding)return;
-        const area=Math.max(1,rect.width*rect.height);
-        if(area<bestArea){best=span;bestArea=area;}
-    });
-    return best;
-}
-
-function stablePageTextSourceId(pageNumber,left,top,text){
-    let hash=2166136261;
-    for(const character of String(text||'')){
-        hash^=character.codePointAt(0);
-        hash=Math.imul(hash,16777619);
-    }
-    return `${pageNumber}:${Math.round(left*10)}:${Math.round(top*10)}:${(hash>>>0).toString(36)}`;
-}
-
-function getElementTransformInfo(element){
-    const transform=getComputedStyle(element).transform;
-    if(!transform||transform==='none')return {angle:0,scaleX:1};
-    const match=/^matrix\(([^)]+)\)$/.exec(transform);
-    if(!match)return {angle:0,scaleX:1};
-    const values=match[1].split(',').map(Number);
-    if(values.length!==6||values.some(value=>!Number.isFinite(value)))return {angle:0,scaleX:1};
-    return {
-        angle:Math.atan2(values[1],values[0])*180/Math.PI,
-        scaleX:Math.max(0.01,Math.hypot(values[0],values[1]))
-    };
-}
-
-async function ensurePdfTextLayerReadyForEditing(pageNumber,container){
-    let layer=container.querySelector('.pdf-text-layer');
-    for(let attempt=0;attempt<3&&layer&&!getPdfTextLayerSpans(layer).length;attempt++){
-        await new Promise(resolve=>requestAnimationFrame(resolve));
-    }
-    if(layer&&getPdfTextLayerSpans(layer).length)return layer;
-    const page=await pdfDoc.getPage(pageNumber);
-    if(layer)delete layer.dataset.viewportKey;
-    const viewport=page.getViewport({scale});
-    await renderPdfTextLayer(page,viewport,container,viewport.width,viewport.height);
-    return container.querySelector('.pdf-text-layer');
-}
-
-async function handlePageTextPlacement(canvas,eventInfo){
-    if(activeTool!=='pageText'||!canvas||!eventInfo||!eventInfo.e||canvas._pageTextPlacementBusy)return;
-    canvas._pageTextPlacementBusy=true;
-    const clientX=Number(eventInfo.e.clientX),clientY=Number(eventInfo.e.clientY);
-    try{
-        const pageNumber=canvas._pageNum||currentVisiblePage;
-        const container=document.querySelector(`[data-page-num="${pageNumber}"]`);
-        if(!container||!Number.isFinite(clientX)||!Number.isFinite(clientY))return;
-        const layer=await ensurePdfTextLayerReadyForEditing(pageNumber,container);
-        const span=findPdfTextSpanAtClientPoint(layer,clientX,clientY);
-        if(!span){showMsg('No editable PDF text at that point (scanned text is an image)');return;}
-
-        const scene=annotationPageSize(canvas);
-        const layerWidth=Math.max(1,layer.offsetWidth||parseFloat(layer.style.width)||container.clientWidth||1);
-        const layerHeight=Math.max(1,layer.offsetHeight||parseFloat(layer.style.height)||container.clientHeight||1);
-        const style=getComputedStyle(span);
-        const transform=getElementTransformInfo(span);
-        const placement=window.EditorUtils.getPageTextReplacementPlacement({
-            layerWidth,layerHeight,
-            sceneWidth:scene.width,sceneHeight:scene.height,
-            offsetLeft:span.offsetLeft,offsetTop:span.offsetTop,
-            offsetWidth:Number(span.offsetWidth)||parseFloat(style.width)||8,
-            transformScaleX:transform.scaleX,
-            fontSize:parseFloat(style.fontSize)||Number(span.offsetHeight)||12,
-            angle:transform.angle
-        });
-        const {left,top,width,fontSize}=placement;
-        const originalText=String(span.textContent||'');
-        const sourceId=stablePageTextSourceId(pageNumber,left,top,originalText);
-        const existing=canvas.getObjects().find(object=>isPageTextReplacement(object)&&object.pageTextSourceId===sourceId);
-        if(existing){
-            canvas.setActiveObject(existing);
-            if(typeof existing.enterEditing==='function')existing.enterEditing();
-            canvas.requestRenderAll();
-            return;
-        }
-
-        const replacement=new fabric.Textbox(originalText,{
-            left,top,width,
-            angle:placement.angle,
-            fontFamily:'sans-serif',
-            fontSize,
-            lineHeight:1,
-            fill:'#000000',
-            backgroundColor:'#ffffff',
-            padding:1,
-            selectable:true,
-            evented:true,
-            annotationType:'pageTextReplacement',
-            pageTextSourceId:sourceId,
-            pageTextOriginal:originalText
-        });
-        configureTextObjectRendering(replacement);
-        canvas._suppressHistory=true;
-        canvas.add(replacement);
-        canvas._suppressHistory=false;
-        canvas.setActiveObject(replacement);
-        replacement.enterEditing();
-        replacement.selectionStart=0;
-        replacement.selectionEnd=originalText.length;
-        updateEditingTextLayout(replacement);
-        hasPendingTextEdits=true;
-        hasUnsavedChanges=true;
-        canvas.requestRenderAll();
-        showMsg('Replace the selected PDF text; delete this box to restore the original');
-    }catch(error){
-        console.error('PDF text edit failed:',error);
-        showMsg('Could not edit that PDF text');
-    }finally{
-        canvas._pageTextPlacementBusy=false;
-    }
-}
-
 function updateSelectedObjectProperties(){
     let updated=false;
     const context=getActiveSelectionContext();
@@ -3288,11 +3180,13 @@ function goToPage(pageNum){
 }
 
 function getTargetPageWidth(viewportWidth){
-    const viewerWidth=Math.max(320,pdfViewer.clientWidth-12);
-    const fallbackWidth=Math.max(320,window.innerWidth-280);
-    const targetWidth=(viewerWidth||fallbackWidth);
+    const viewerWidth=pdfViewer.clientWidth;
+    const fallbackWidth=window.innerWidth-280;
+    const targetWidth=Math.max(1,(viewerWidth>0?viewerWidth:fallbackWidth)-12);
     const calculatedScale=targetWidth/viewportWidth;
-    return Math.max(0.25,Math.min(5,calculatedScale*PAGE_SCALE_ADJUST));
+    // Large-format sheets may need a PDF scale far below 25% to fit.
+    // The zoom control is relative to this fitted size, not the PDF's native size.
+    return Math.min(5,calculatedScale*PAGE_SCALE_ADJUST);
 }
 
 function updateVisiblePage(){
@@ -3379,6 +3273,8 @@ function isContainerNearViewport(container,margin=PDF_REFRESH_MARGIN_PX){
 async function ensurePagePdfLayerAtCurrentZoom(pageNum,container,force=false){
     if(!pdfDoc||!container)return false;
     const desiredZoom=zoomFactor;
+    const desiredScale=scale;
+    const documentToRender=pdfDoc;
     const desiredKey=getZoomKey(desiredZoom);
     if(!force&&container.dataset.pdfZoom===desiredKey)return true;
     if(pendingPdfRefreshPages.has(pageNum))return false;
@@ -3388,28 +3284,42 @@ async function ensurePagePdfLayerAtCurrentZoom(pageNum,container,force=false){
 
     pendingPdfRefreshPages.add(pageNum);
     try{
-        const page=await pdfDoc.getPage(pageNum);
+        const page=await documentToRender.getPage(pageNum);
         // Abort stale rerenders if zoom changed mid-flight.
-        if(Math.abs(zoomFactor-desiredZoom)>0.001)return false;
+        if(pdfDoc!==documentToRender||scale!==desiredScale||
+            (queuedZoomFactor!==null&&queuedZoomFactor!==desiredZoom))return false;
 
-        const dpr=window.devicePixelRatio||1;
-        const viewport=page.getViewport({scale:scale*dpr});
-        const textViewport=page.getViewport({scale});
-        const displayWidth=viewport.width/dpr;
-        const displayHeight=viewport.height/dpr;
+        const textViewport=page.getViewport({scale:desiredScale});
+        const displayWidth=textViewport.width;
+        const displayHeight=textViewport.height;
+        const dpr=getCanvasPixelRatio(displayWidth,displayHeight);
+        const viewport=page.getViewport({scale:desiredScale*dpr});
 
         container.style.width=`${displayWidth}px`;
         container.style.height=`${displayHeight}px`;
         container.style.minHeight=`${displayHeight}px`;
-        pdfCanvas.width=viewport.width;
-        pdfCanvas.height=viewport.height;
         pdfCanvas.style.width=`${displayWidth}px`;
         pdfCanvas.style.height=`${displayHeight}px`;
 
-        const didRender=await renderPdfCanvasLayer(pageNum,page,pdfCanvas,viewport);
-        if(!didRender)return false;
-        await renderPdfTextLayer(page,textViewport,container,displayWidth,displayHeight);
-        if(Math.abs(zoomFactor-desiredZoom)<=0.001)container.dataset.pdfZoom=desiredKey;
+        // Never clear the visible bitmap while PDF.js is still painting.
+        const nextCanvas=document.createElement('canvas');
+        nextCanvas.className='pdf-viewer-canvas';
+        nextCanvas.width=Math.max(1,Math.floor(viewport.width));
+        nextCanvas.height=Math.max(1,Math.floor(viewport.height));
+        nextCanvas.style.width=`${displayWidth}px`;
+        nextCanvas.style.height=`${displayHeight}px`;
+        try{
+            const didRender=await renderPdfCanvasLayer(pageNum,page,nextCanvas,viewport);
+            if(!didRender||pdfDoc!==documentToRender||scale!==desiredScale||
+                (queuedZoomFactor!==null&&queuedZoomFactor!==desiredZoom))return false;
+            pdfCanvas.replaceWith(nextCanvas);
+            pdfCanvas.width=pdfCanvas.height=0;
+        }finally{
+            if(!nextCanvas.parentElement)nextCanvas.width=nextCanvas.height=0;
+        }
+        if(container.querySelector('.pdf-text-layer'))scaleExistingPdfTextLayer(container,displayWidth,displayHeight);
+        else await renderPdfTextLayer(page,textViewport,container,displayWidth,displayHeight);
+        container.dataset.pdfZoom=desiredKey;
         return true;
     }finally{
         pendingPdfRefreshPages.delete(pageNum);
@@ -3558,10 +3468,10 @@ async function renderPage(n,containerOverride=null){
             baseScale=getTargetPageWidth(vp.width);
         }
         scale=baseScale;
-        const dpr=window.devicePixelRatio||1;
-        const rv=pg.getViewport({scale:scale*dpr});
         const textViewport=pg.getViewport({scale});
-        const dw=rv.width/dpr,dh=rv.height/dpr;
+        const dw=textViewport.width,dh=textViewport.height;
+        const dpr=getCanvasPixelRatio(dw,dh);
+        const rv=pg.getViewport({scale:scale*dpr});
         defaultPageSize={w:dw,h:dh};
 
         cont=containerOverride||document.querySelector(`[data-page-num="${n}"]`)||document.createElement('div');
@@ -3571,7 +3481,7 @@ async function renderPage(n,containerOverride=null){
 
         const pdfC=document.createElement('canvas');
         pdfC.className='pdf-viewer-canvas';
-        pdfC.width=rv.width;pdfC.height=rv.height;
+        pdfC.width=Math.max(1,Math.floor(rv.width));pdfC.height=Math.max(1,Math.floor(rv.height));
         pdfC.style.width=`${dw}px`;pdfC.style.height=`${dh}px`;
         cont.appendChild(pdfC);
         const didRenderPdf=await renderPdfCanvasLayer(n,pg,pdfC,rv);
@@ -3589,7 +3499,9 @@ async function renderPage(n,containerOverride=null){
         fabEl.style.position='absolute';fabEl.style.top='0';fabEl.style.left='0';
         cont.appendChild(fabEl);
 
-        const fc=new fabric.Canvas(fabEl,{selection:true,isDrawingMode:false,width:dw,height:dh});
+        const fc=new fabric.Canvas(fabEl,{selection:true,isDrawingMode:false,width:1,height:1});
+        configureCanvasPixelBudget(fc);
+        setFabricCanvasDimensions(fc,dw,dh);
         fc._pageNum=n;
         fc._lastSavedState=getSerializedCanvasState(fc);
         fc.selectionFullyContained=false;
@@ -3748,7 +3660,6 @@ async function renderPage(n,containerOverride=null){
                 if(isShapeModeTool(activeTool)) handleShapeStart(fc,o);
             }else if(!o.target){
                 if(activeTool==='text') handleTextPlacement(fc,o);
-                else if(activeTool==='pageText')void handlePageTextPlacement(fc,o);
             }
         });
 
@@ -5333,7 +5244,7 @@ async function insertImageOnCanvas(dataUrl,{targetCanvas=null,announceMessage='I
 // ─── ZOOM CONTROLS ──────────────────────────────────
 const zoomLevelEl=document.getElementById('zoomLevel');
 const ZOOM_STEP=0.15;
-const ZOOM_MIN=0.25;
+const ZOOM_MIN=0.05;
 const ZOOM_MAX=3.0;
 
 function updateZoomDisplay(){
@@ -5420,17 +5331,10 @@ async function applyZoom(newFactor){
             fc.calcOffset();
             fc.requestRenderAll();
 
-            if(cont&&isContainerNearViewport(cont)){
-                try{
-                    await ensurePagePdfLayerAtCurrentZoom(n,cont,true);
-                }catch(err){
-                    if(!isRenderCancelledError(err))console.error(`PDF rerender error page ${n}:`,err);
-                }
-            }else if(cont){
+            if(cont){
                 const pdfC=cont.querySelector('.pdf-viewer-canvas');
                 if(pdfC){
-                    // Fast path for distant pages: resize display now, rerender PDF when page
-                    // comes back near viewport (observer/goToPage).
+                    // Scale the previous image immediately; replace only when ready.
                     pdfC.style.width=`${dw}px`;
                     pdfC.style.height=`${dh}px`;
                 }
@@ -5462,6 +5366,14 @@ async function applyZoom(newFactor){
         updateVisiblePage();
         // Deferred offset recalc after DOM reflow settles
         requestAnimationFrame(()=>{fabricCanvases.forEach(fc=>fc.calcOffset());});
+        // Choose pages after restoring scroll position. Skip intermediate zooms.
+        for(const [n] of fabricCanvases){
+            if(queuedZoomFactor!==null)break;
+            const cont=document.querySelector(`[data-page-num="${n}"]`);
+            if(!cont||!isContainerNearViewport(cont))continue;
+            try{await ensurePagePdfLayerAtCurrentZoom(n,cont,true);}
+            catch(err){if(!isRenderCancelledError(err))console.error(`PDF rerender error page ${n}:`,err);}
+        }
     }finally{
         restoreEditingTextStates(editingStates,{resumeEditing:false});
     }
@@ -5469,11 +5381,17 @@ async function applyZoom(newFactor){
 
 let _zoomRetries=0;
 async function queueZoom(newFactor){
-    queuedZoomFactor=clampZoom(newFactor);
+    newFactor=clampZoom(newFactor);
+    if(newFactor===getPendingZoomBase())return;
+    queuedZoomFactor=newFactor;
+    // Stop obsolete refreshes without interrupting initial page creation.
+    for(const pageNum of pendingPdfRefreshPages)cancelPageRenderTask(pageNum);
     if(zoomWorkerActive)return;
     zoomWorkerActive=true;
     try{
         while(queuedZoomFactor!==null){
+            await new Promise(resolve=>setTimeout(resolve,60));
+            if(queuedZoomFactor===null)break;
             const next=queuedZoomFactor;
             queuedZoomFactor=null;
             await applyZoom(next);
@@ -5820,7 +5738,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-09-09 16:59 PDT';
+        const built='2026-10-01 13:46 PDT';
         bd.textContent='Built '+built;
     }
 }

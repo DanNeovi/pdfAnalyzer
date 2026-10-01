@@ -22,15 +22,13 @@ assert.match(app, /await hydrateEmbeddedAnnotations\(embeddedState\.payload,nati
 assert.match(app, /await restoreEmbeddedPageAnnotations\(fc,pendingEmbeddedPage\)/);
 assert.match(html, /native-annotation-utils\.js\?v=/);
 
-for (const tool of ['draw','text','pageText','line','arrow','rect','circle','highlight','cloud']) {
+for (const tool of ['draw','text','line','arrow','rect','circle','highlight','cloud']) {
     assert.match(app, new RegExp(`${tool}:'`), `${tool} should remain an annotation tool`);
 }
 assert.match(app, /annotationType:'insertedImage'/);
-assert.match(app, /annotationType:'pageTextReplacement'/);
-assert.match(app, /backgroundColor:'#ffffff'/);
 assert.match(app, /isPageTextReplacement\(object\)[\s\S]{0,120}parseCssColor\(object\.backgroundColor/,
     'replacement text background must be retained in the standard FreeText annotation');
-assert.match(html, /data-tool="pageText"/);
+assert.doesNotMatch(html, /data-tool="pageText"/);
 assert.doesNotMatch(html, /Export Layer|Import Layer|\.draftanno/);
 
 console.log('editable PDF flow tests passed');

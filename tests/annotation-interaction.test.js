@@ -24,16 +24,6 @@ test('completed rectangles and ellipses rebuild zero-size previews for immediate
         'highlight boxes and ellipses need the same post-drag coordinate refresh');
 });
 
-test('existing PDF text uses a separate reversible editing mode', () => {
-    assert.match(app, /function handlePageTextPlacement\(canvas,eventInfo\)/);
-    assert.match(app, /activeTool!=='pageText'/);
-    assert.match(app, /new fabric\.Textbox\(originalText/);
-    assert.match(app, /pageTextOriginal:originalText/);
-    assert.match(app, /tool==='select'\|\|\(tool==='pageText'&&isPageTextReplacement\(obj\)\)/,
-        'Tool 1 edits everything while the PDF-text tool isolates replacement text');
-    assert.match(app, /delete this box to restore the original/);
-});
-
 test('paste and duplicate create new native annotation identities', () => {
     const prepareStart = app.indexOf('function prepareClipboardObject(obj)');
     const prepareEnd = app.indexOf('\nfunction keepObjectsInsideCanvas', prepareStart);
