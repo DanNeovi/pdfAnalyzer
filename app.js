@@ -187,6 +187,8 @@ let suppressTextEditingLifecycle=false;
 const activePdfRenderTasks=new Map();
 const pendingPdfRefreshPages=new Set();
 let queuedZoomFactor=null;
+let queuedZoomAnchor=null;
+let lastZoomPointer=null;
 let zoomWorkerActive=false;
 let maxStrokeSize=DEFAULT_MAX_STROKE_SIZE;
 let maxTextSize=DEFAULT_MAX_TEXT_SIZE;
@@ -3729,6 +3731,8 @@ async function renderAllPages(){
     if(!pdfDoc)return;
     cancelAllRenderTasks();
     queuedZoomFactor=null;
+    queuedZoomAnchor=null;
+    lastZoomPointer=null;
     zoomWorkerActive=false;
     await disposeAllFabricCanvases();
     pdfViewer.innerHTML='';
@@ -5259,6 +5263,51 @@ function getScrollContainer(){
     return document.scrollingElement||document.documentElement;
 }
 
+function captureZoomAnchor(pointer=lastZoomPointer){
+    const hit=pointer&&document.elementFromPoint(pointer.clientX,pointer.clientY);
+    let page=hit&&hit.closest('.pdf-page-container');
+    let clientX=pointer&&pointer.clientX,clientY=pointer&&pointer.clientY;
+    if(!page){
+        page=document.querySelector(`[data-page-num="${currentVisiblePage}"]`);
+        if(!page)return null;
+        const rect=page.getBoundingClientRect();
+        const header=document.querySelector('header');
+        const top=header?header.getBoundingClientRect().bottom:0;
+        const viewerRect=pdfViewer.getBoundingClientRect();
+        clientX=(Math.max(0,viewerRect.left,rect.left)+Math.min(window.innerWidth,rect.right))/2;
+        clientY=(Math.max(top,rect.top)+Math.min(window.innerHeight,rect.bottom))/2;
+    }
+    const rect=page.getBoundingClientRect();
+    if(rect.width<=0||rect.height<=0)return null;
+    return {pageNum:Number(page.dataset.pageNum),clientX,clientY,
+        x:clampNumber((clientX-rect.left)/rect.width,0,1),
+        y:clampNumber((clientY-rect.top)/rect.height,0,1)};
+}
+
+function restoreZoomAnchor(anchor){
+    if(!anchor)return;
+    const page=document.querySelector(`[data-page-num="${anchor.pageNum}"]`);
+    if(!page)return;
+    const scrollEl=getScrollContainer();
+    const rect=page.getBoundingClientRect();
+    if(scrollEl){
+        scrollEl.scrollLeft+=rect.left+anchor.x*rect.width-anchor.clientX;
+        scrollEl.scrollTop+=rect.top+anchor.y*rect.height-anchor.clientY;
+    }
+    // Centered oversized sheets can extend beyond the scrollable left edge.
+    // Use the existing pan offset for any movement scrolling cannot provide.
+    const settled=page.getBoundingClientRect();
+    panOffsetX+=anchor.clientX-(settled.left+anchor.x*settled.width);
+    panOffsetY+=anchor.clientY-(settled.top+anchor.y*settled.height);
+    pdfViewer.style.transform=`translate(${panOffsetX}px,${panOffsetY}px)`;
+}
+
+document.addEventListener('pointermove',event=>{
+    if(event.target.closest&&event.target.closest('.pdf-page-container')){
+        lastZoomPointer={clientX:event.clientX,clientY:event.clientY};
+    }
+});
+
 function captureViewportFocus(scrollEl){
     if(!scrollEl)return null;
     const focusY=scrollEl.scrollTop+scrollEl.clientHeight/2;
@@ -5295,15 +5344,10 @@ function getPendingZoomBase(){
     return queuedZoomFactor===null?zoomFactor:queuedZoomFactor;
 }
 
-async function applyZoom(newFactor){
+async function applyZoom(newFactor,anchor=captureZoomAnchor()){
     newFactor=clampZoom(newFactor);
     if(Math.abs(newFactor-zoomFactor)<0.001)return;
     const scrollEl=getScrollContainer();
-    let scrollRatio=0;
-    if(scrollEl){
-        const maxScroll=Math.max(1,scrollEl.scrollHeight-scrollEl.clientHeight);
-        scrollRatio=scrollEl.scrollTop/maxScroll;
-    }
     const editingStates=captureEditingTextStates();
     try{
         zoomFactor=newFactor;
@@ -5354,15 +5398,10 @@ async function applyZoom(newFactor){
             }
         }
 
-        if(scrollEl){
-            if(pendingResizeFocus){
-                restoreViewportFocus(scrollEl,pendingResizeFocus);
-                pendingResizeFocus=null;
-            }else{
-                const maxScroll=Math.max(1,scrollEl.scrollHeight-scrollEl.clientHeight);
-                scrollEl.scrollTop=scrollRatio*maxScroll;
-            }
-        }
+        if(pendingResizeFocus){
+            restoreViewportFocus(scrollEl,pendingResizeFocus);
+            pendingResizeFocus=null;
+        }else restoreZoomAnchor(anchor);
         updateVisiblePage();
         // Deferred offset recalc after DOM reflow settles
         requestAnimationFrame(()=>{fabricCanvases.forEach(fc=>fc.calcOffset());});
@@ -5380,10 +5419,11 @@ async function applyZoom(newFactor){
 }
 
 let _zoomRetries=0;
-async function queueZoom(newFactor){
+async function queueZoom(newFactor,pointer){
     newFactor=clampZoom(newFactor);
     if(newFactor===getPendingZoomBase())return;
     queuedZoomFactor=newFactor;
+    queuedZoomAnchor=captureZoomAnchor(pointer);
     // Stop obsolete refreshes without interrupting initial page creation.
     for(const pageNum of pendingPdfRefreshPages)cancelPageRenderTask(pageNum);
     if(zoomWorkerActive)return;
@@ -5393,8 +5433,10 @@ async function queueZoom(newFactor){
             await new Promise(resolve=>setTimeout(resolve,60));
             if(queuedZoomFactor===null)break;
             const next=queuedZoomFactor;
+            const anchor=queuedZoomAnchor;
             queuedZoomFactor=null;
-            await applyZoom(next);
+            queuedZoomAnchor=null;
+            await applyZoom(next,anchor);
             _zoomRetries=0;
         }
     }catch(err){
@@ -5438,7 +5480,7 @@ document.addEventListener('wheel',(e)=>{
     if(e.ctrlKey||e.metaKey){
         e.preventDefault();
         const delta=e.deltaY>0?-ZOOM_STEP:ZOOM_STEP;
-        queueZoom(getPendingZoomBase()+delta);
+        queueZoom(getPendingZoomBase()+delta,{clientX:e.clientX,clientY:e.clientY});
     }
 },{passive:false});
 
@@ -5738,7 +5780,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-10-01 13:46 PDT';
+        const built='2026-10-01 13:54 PDT';
         bd.textContent='Built '+built;
     }
 }

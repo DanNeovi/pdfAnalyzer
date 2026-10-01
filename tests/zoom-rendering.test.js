@@ -92,25 +92,27 @@ test('cancelled, obsolete and failed redraws preserve the last visible page', as
 });
 
 test('rapid zoom requests coalesce and repeated requests at the limit do not cancel work', async () => {
-    const timers = [], applied = [], cancelled = [];
+    const timers = [], applied = [], anchors = [], cancelled = [];
     const c = vm.createContext({
-        zoomFactor: 1, queuedZoomFactor: null, zoomWorkerActive: false,
+        zoomFactor: 1, queuedZoomFactor: null, queuedZoomAnchor: null, zoomWorkerActive: false,
+        captureZoomAnchor: pointer => pointer || null,
         pendingPdfRefreshPages: new Set([1]), cancelPageRenderTask: n => cancelled.push(n),
         clampZoom: n => Math.max(0.05, Math.min(3, n)),
         setTimeout: resolve => timers.push(resolve),
-        applyZoom: async n => { applied.push(n); c.zoomFactor = n; },
+        applyZoom: async (n, anchor) => { applied.push(n); anchors.push(anchor); c.zoomFactor = n; },
         isRenderCancelledError: () => false, console
     });
     vm.runInContext(section('function getPendingZoomBase(', '\nasync function applyZoom(') +
         section('let _zoomRetries=0;', '\nfunction zoomIn('), c);
-    const work = c.queueZoom(1.15);
-    await c.queueZoom(2);
-    await c.queueZoom(3);
+    const work = c.queueZoom(1.15, {clientX: 200, clientY: 300});
+    await c.queueZoom(2, {clientX: 250, clientY: 350});
+    await c.queueZoom(3, {clientX: 300, clientY: 400});
     const count = cancelled.length;
     await c.queueZoom(3);
     assert.equal(cancelled.length, count);
     timers.shift()();
     await work;
     assert.deepEqual(applied, [3]);
+    assert.deepEqual(anchors, [{clientX: 300, clientY: 400}]);
     assert.equal(c.zoomWorkerActive, false);
 });
