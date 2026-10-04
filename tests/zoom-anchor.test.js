@@ -92,8 +92,24 @@ test('wheel zoom passes actual pointer coordinates into the zoom queue', () => {
         ZOOM_STEP: 0.15, getPendingZoomBase: () => 1,
         queueZoom: (factor, pointer) => { received = {factor, ...pointer}; }
     });
-    vm.runInContext(section("document.addEventListener('wheel'", '// ─── INIT'), c);
+    vm.runInContext(section('let lastWheelZoomDirection=0;', 'loadArrowModePreference();'), c);
     listener({ctrlKey: true, deltaY: -1, clientX: 456, clientY: 321, preventDefault() { prevented = true; }});
     assert.equal(prevented, true);
     assert.deepEqual(received, {factor: 1.15, clientX: 456, clientY: 321});
+});
+
+test('wheel zoom reverses immediately despite queued steps in the old direction', () => {
+    let listener;
+    const requests = [];
+    const c = vm.createContext({
+        document: {addEventListener: (name, fn) => { listener = fn; }},
+        ZOOM_STEP: 0.15, zoomFactor: 1, pending: 1,
+        getPendingZoomBase: () => c.pending,
+        queueZoom: factor => { requests.push(factor); c.pending = factor; }
+    });
+    vm.runInContext(section('let lastWheelZoomDirection=0;', 'loadArrowModePreference();'), c);
+    const wheel = deltaY => listener({ctrlKey: true, deltaY, preventDefault() {}});
+    wheel(-1); wheel(-1); wheel(-1);
+    wheel(1); wheel(1);
+    assert.deepEqual(requests.map(n => Math.round(n * 100)), [115, 130, 145, 85, 70]);
 });

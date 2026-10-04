@@ -5476,11 +5476,19 @@ window.addEventListener('resize',()=>{
 });
 
 // Ctrl+scroll and Ctrl+/- zoom
+let lastWheelZoomDirection=0;
 document.addEventListener('wheel',(e)=>{
     if(e.ctrlKey||e.metaKey){
         e.preventDefault();
+        if(e.deltaY===0)return;
         const delta=e.deltaY>0?-ZOOM_STEP:ZOOM_STEP;
-        queueZoom(getPendingZoomBase()+delta,{clientX:e.clientX,clientY:e.clientY});
+        const direction=Math.sign(delta);
+        // Drop unrendered steps from the previous direction when the wheel reverses.
+        const base=lastWheelZoomDirection&&direction!==lastWheelZoomDirection?zoomFactor:getPendingZoomBase();
+        lastWheelZoomDirection=direction;
+        queueZoom(base+delta,{clientX:e.clientX,clientY:e.clientY});
+    }else{
+        lastWheelZoomDirection=0;
     }
 },{passive:false});
 
@@ -5780,7 +5788,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); });
     const bd=document.getElementById('buildDate');
     if(bd){
         // Auto-stamped by hooks/pre-commit on every commit. Do not edit by hand.
-        const built='2026-10-01 13:54 PDT';
+        const built='2026-10-03 23:42 PDT';
         bd.textContent='Built '+built;
     }
 }
